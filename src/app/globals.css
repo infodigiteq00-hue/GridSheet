@@ -1,26 +1,148 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --ink: #17161a;
+  --paper: #f3f1ec;
+  --card: #fdfcfa;
+  --panel: #f0eee8;
+  --panel-line: #f7f5f1;
+  --published-bg: #eeece6;
+  --blue: #2b4bff;
+  --blue-dark: #1a2fb8;
+  --blue-tint: #e5e9ff;
+  --teal: #00a6a6;
+  --teal-dark: #00806f;
+  --red: #ff5c46;
+  --red-dark: #c0341c;
+  --amber: #ffb020;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@layer base {
+  * ,*::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-plex-sans), system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { text-decoration: none; }
+
+  input, select, button, textarea { font: inherit; color: inherit; }
+
+  ::selection { background: #cdd5ff; }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(23,22,26,0.16); border-radius: 20px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(23,22,26,0.28); }
+
+  input[type="range"] { accent-color: var(--blue); }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@keyframes gsRise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-space-grotesk), sans-serif;
+  }
+
+  .font-mono-plex {
+    font-family: var(--font-plex-mono), monospace;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* While a PDF export capture is in flight, hide interactive-only chrome
+   (remove buttons, resize handles, drag hints) inside the dashboard canvas
+   so the exported image looks clean. Toggled via Canvas.tsx's `exporting`
+   state — see `.is-exporting`. */
+.is-exporting .export-hide {
+  visibility: hidden !important;
+}
+
+.is-exporting #dashboard-export-area {
+  overflow: visible !important;
+}
+
+.dashboard-resize-hit {
+  width: 36px;
+  height: 36px;
+}
+
+.dashboard-tile {
+  cursor: grab;
+}
+
+.dashboard-infinite-mode {
+  background: #e7e5df;
+}
+
+.dashboard-infinite-scroll {
+  cursor: grab;
+  background-color: #e7e5df;
+  background-image: radial-gradient(rgba(23, 22, 26, 0.16) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.dashboard-infinite-scroll:active {
+  cursor: grabbing;
+}
+
+.dashboard-infinite-stage {
+  position: relative;
+  width: 2200px;
+  min-height: 1800px;
+}
+
+.dashboard-tile.is-lifting {
+  cursor: grabbing;
+}
+
+/* Chart marks set their own cursor for hover affordances. They are still part
+   of the draggable tile, so keep the move affordance visible on those marks. */
+.dashboard-tile [style*="cursor: default"] {
+  cursor: grab !important;
+}
+
+.dashboard-tile button,
+.dashboard-tile button * {
+  cursor: pointer !important;
+}
+
+.dashboard-tile textarea,
+.dashboard-tile input,
+.dashboard-tile select {
+  cursor: text !important;
+}
+
+.dashboard-tile .dashboard-resize-hit,
+.dashboard-tile .dashboard-resize-hit * {
+  cursor: nwse-resize !important;
+}
+
+body.is-tile-dragging,
+body.is-tile-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+body.is-tile-resizing,
+body.is-tile-resizing * {
+  cursor: nwse-resize !important;
+  user-select: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-tile {
+    transition: none !important;
+  }
 }
