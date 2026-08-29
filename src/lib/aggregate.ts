@@ -11,8 +11,10 @@ export function listDimNames(columns: ColumnMeta[]): string[] {
 export function listMeasureNames(columns: ColumnMeta[]): string[] {
   const m = columns.filter((c) => c.role === "measure").map((c) => c.name);
   if (m.length) return m;
-  const fallback = columns.filter((c) => c.type === "number").map((c) => c.name);
-  return fallback.length ? fallback : columns.map((c) => c.name);
+  // Only unclassified numerics may fall through. Columns explicitly marked
+  // dimension/ignore (account codes, years, keys) are labels, and the old
+  // "else use every column" fallback made even text columns look chartable.
+  return columns.filter((c) => c.type === "number" && c.role !== "dimension" && c.role !== "ignore").map((c) => c.name);
 }
 
 export interface AggPoint {

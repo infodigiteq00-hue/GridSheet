@@ -20,21 +20,26 @@ export function pickDims(columns: ColumnMeta[], n: number): string[] {
   return out;
 }
 
-export function pickMeasures(columns: ColumnMeta[], n: number): string[] {
-  let cands = columns.filter((c) => c.role === "measure");
-  if (!cands.length) cands = columns.filter((c) => c.type === "number");
-  if (!cands.length) cands = columns;
-  const names = cands.map((c) => c.name);
-  const out: string[] = [];
-  for (let i = 0; i < n; i++) out.push(names[Math.min(i, names.length - 1)] ?? "Value");
-  return out;
-}
-
-/** Every chartable numeric column, uncapped — unlike pickMeasures this doesn't truncate to a top-N. */
+/**
+ * Numeric columns that are safe to do arithmetic on. The shape-based fallback
+ * deliberately skips anything already classified as a dimension or ignored:
+ * an account code or a year is stored as a number but summing it is
+ * meaningless, and the old fallback let exactly those back in whenever a sheet
+ * happened to have no real measures. When nothing qualifies the answer is an
+ * empty list — a sheet with no quantities should produce no quantitative
+ * charts rather than charting a label.
+ */
 export function pickAllMeasures(columns: ColumnMeta[]): string[] {
   const measures = columns.filter((c) => c.role === "measure");
-  const cands = measures.length ? measures : columns.filter((c) => c.type === "number");
-  return cands.map((c) => c.name);
+  if (measures.length) return measures.map((c) => c.name);
+  return columns.filter((c) => c.type === "number" && c.role !== "dimension" && c.role !== "ignore").map((c) => c.name);
+}
+
+export function pickMeasures(columns: ColumnMeta[], n: number): string[] {
+  const names = pickAllMeasures(columns);
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) out.push(names[Math.min(i, names.length - 1)] ?? "");
+  return out;
 }
 
 /** Line for a date-indexed trend, pie for a small category breakdown, bar as the general case. */
@@ -69,7 +74,7 @@ export function generateHeuristicLayout(columns: ColumnMeta[], kind: TemplateKin
   const dims = pickDims(columns, 2);
   const measures = pickMeasures(columns, 4);
   const [d0, d1] = dims;
-  const [m0, m1, m2, m3] = measures;
+  const [m0, m1, m2] = measures;
 
   let widgets: Widget[] = [];
 
@@ -136,6 +141,12 @@ export function generateHeuristicLayout(columns: ColumnMeta[], kind: TemplateKin
     });
     if (d1 && allMeasures.length) {
       widgets.push(mk({ type: "pivot", title: `${allMeasures[0]}: ${d0} × ${d1}`, dim: d0, measure: allMeasures[0], colSpan: 12, height: 300 }));
+    }
+    // A pure lookup sheet (codes, names, regions — no quantities) has nothing
+    // to chart. Show the records themselves instead of leaving it blank or,
+    // worse, plotting an identifier just to fill the space.
+    if (allMeasures.length === 0) {
+      widgets.push(mk({ type: "table", title: boardTitleHint || "All records", dim: d0, measure: "", colSpan: 12, height: 320 }));
     }
   }
 

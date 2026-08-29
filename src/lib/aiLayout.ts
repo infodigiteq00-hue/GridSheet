@@ -1,6 +1,19 @@
-import { mk, pickDims, pickMeasures } from "./heuristicLayout";
+import { mk, pickAllMeasures, pickDims, pickMeasures } from "./heuristicLayout";
 import { packFlow } from "./gridLayout";
 import { ColumnMeta, DashboardState, PaletteKey, SortMode, TYPES, Widget, WidgetType } from "./types";
+
+/** Tile types whose whole purpose is arithmetic over a measure. */
+const QUANTITATIVE_TYPES = new Set<WidgetType>([
+  "bar",
+  "line",
+  "area",
+  "pie",
+  "kpi",
+  "gauge",
+  "heatmap",
+  "scatter",
+  "pivot",
+]);
 
 export interface AiWidgetSpec {
   type?: string;
@@ -96,10 +109,14 @@ export function sanitizeAiWidget(raw: unknown, columns: ColumnMeta[], base?: Wid
   const fallbackType: WidgetType = base?.type || "bar";
   const type = (TYPES as string[]).includes(item.type || "") ? (item.type as WidgetType) : fallbackType;
 
+  const allowedMeasures = new Set(pickAllMeasures(columns));
   const fallbackDim = base?.dim || dims[0] || "";
   const fallbackMeasure = base?.measure || measures[0] || "";
   const dim = item.dim && validNames.has(item.dim) ? item.dim : fallbackDim;
-  const measure = item.measure && validNames.has(item.measure) ? item.measure : fallbackMeasure;
+  // Same enforcement as sanitizeAiLayout: existing-column is not the bar,
+  // being an actual measure is. Otherwise "make a KPI of account_code"
+  // produces arithmetic over an identifier.
+  const measure = item.measure && allowedMeasures.has(item.measure) ? item.measure : fallbackMeasure;
 
   const palette = PALETTE_KEYS.includes(item.palette as PaletteKey) ? (item.palette as PaletteKey) : base?.palette || "cobalt";
   const sort = SORT_MODES.includes(item.sort as SortMode) ? (item.sort as SortMode) : base?.sort || "natural";
@@ -135,15 +152,23 @@ export function sanitizeAiLayout(raw: unknown, columns: ColumnMeta[]): Dashboard
   const measures = pickMeasures(columns, 3);
   const fallbackDim = dims[0] || "";
   const fallbackMeasure = measures[0] || "";
+  // The model is told each column's role but does not reliably respect it —
+  // it still returned "total account_code" tiles. Checking only that a column
+  // exists is not validation, so the allowed set is the real measure list.
+  const allowedMeasures = new Set(pickAllMeasures(columns));
+  const hasMeasures = allowedMeasures.size > 0;
 
   const widgets: Widget[] = [];
   for (const item of spec.widgets) {
     if (!item || typeof item !== "object") continue;
     const type = (TYPES as string[]).includes(item.type || "") ? (item.type as WidgetType) : null;
     if (!type) continue;
+    // A sheet with nothing to count gets no quantitative tiles at all, rather
+    // than a chart of an identifier or a KPI that renders a meaningless 0.
+    if (!hasMeasures && QUANTITATIVE_TYPES.has(type)) continue;
 
     const dim = item.dim && validNames.has(item.dim) ? item.dim : fallbackDim;
-    const measure = item.measure && validNames.has(item.measure) ? item.measure : fallbackMeasure;
+    const measure = item.measure && allowedMeasures.has(item.measure) ? item.measure : fallbackMeasure;
     const palette = PALETTE_KEYS.includes(item.palette as PaletteKey) ? (item.palette as PaletteKey) : "cobalt";
     const sort = SORT_MODES.includes(item.sort as SortMode) ? (item.sort as SortMode) : "natural";
     const compact = type === "kpi" || type === "gauge";

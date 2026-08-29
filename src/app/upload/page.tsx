@@ -47,6 +47,7 @@ export default function UploadPage() {
   const [mode, setMode] = useState<"file" | "link">("file");
   const [linkUrl, setLinkUrl] = useState("");
   const [linkLoading, setLinkLoading] = useState(false);
+  const [sampleLoading, setSampleLoading] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
   const [importerOpen, setImporterOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -103,6 +104,45 @@ export default function UploadPage() {
     setNotice(null);
     addDatasets([buildSampleDataset()]);
     setImporterOpen(false);
+  }
+
+  /**
+   * One-click path to the multi-sheet features. The built-in sample is a
+   * single 48-row sheet, so relationship detection and cross-sheet tiles were
+   * only reachable if you happened to have a linked workbook of your own to
+   * hand. This loads the bundled accounts workbook straight from /public.
+   */
+  async function loadAccountsSample() {
+    setError(null);
+    setNotice(null);
+    setSampleLoading(true);
+    try {
+      const res = await fetch("/api/import-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: `${window.location.origin}/samples/Meridian_Global_Accounts_Sample.xlsx` }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Couldn't load the accounts sample.");
+        return;
+      }
+      addDatasets(
+        data.sheets.map((s: { sheetName: string; rows: DatasetInput["rows"]; columns: DatasetInput["columns"] }) => ({
+          fileName: data.fileName,
+          sheetName: s.sheetName,
+          rows: s.rows,
+          columns: s.columns,
+          isSample: true,
+        }))
+      );
+      setImporterOpen(false);
+      setNotice(`Loaded the accounts sample — ${data.sheets.length} connected sheets.`);
+    } catch {
+      setError("Couldn't load the accounts sample.");
+    } finally {
+      setSampleLoading(false);
+    }
   }
 
   async function importFromLink() {
@@ -310,7 +350,19 @@ export default function UploadPage() {
                 >
                   use the sample workbook
                 </button>{" "}
-                — 48 rows of regional sales
+                — 48 rows of regional sales, or{" "}
+                <button
+                  type="button"
+                  disabled={sampleLoading}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    loadAccountsSample();
+                  }}
+                  className="underline text-[#2b4bff] hover:text-[#1a2fb8] cursor-pointer disabled:opacity-60 disabled:cursor-default"
+                >
+                  {sampleLoading ? "loading…" : "the 7-sheet accounts sample"}
+                </button>{" "}
+                — a multinational ledger, to see connected sheets
               </div>
             </div>
           )}
@@ -394,7 +446,12 @@ export default function UploadPage() {
             ))}
           </div>
 
-          <div className="flex gap-3 items-center pt-2 flex-wrap">
+          {/* Sticky: with several sheets imported this page runs past seven
+              screens (sheet cards, then every detected connection, then the
+              column table), which left the primary action stranded at the
+              very bottom. Keeping it docked means "Build my dashboard" is
+              always one click away no matter how much data is loaded. */}
+          <div className="sticky bottom-0 z-20 -mx-8 mt-2 flex flex-wrap items-center gap-3 border-t border-[rgba(23,22,26,0.1)] bg-[#f8f7f4]/92 px-8 py-4 backdrop-blur">
             <button
               onClick={buildFromUpload}
               disabled={building}
@@ -419,7 +476,11 @@ export default function UploadPage() {
               Start over
             </button>
             <div className="text-[13px] text-[#7a7981]">
-              {measureCount} measures · {dimensionCount} groups in {dataset.label}
+              {/* The build covers every imported sheet, so say so — naming only
+                  the sheet being mapped read as though the rest were ignored. */}
+              {datasets.length > 1
+                ? `Builds all ${datasets.length} sheets · ${measureCount} measures, ${dimensionCount} groups in ${dataset.label}`
+                : `${measureCount} measures · ${dimensionCount} groups in ${dataset.label}`}
             </div>
           </div>
         </div>
