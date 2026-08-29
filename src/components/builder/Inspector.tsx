@@ -62,6 +62,11 @@ export default function Inspector() {
   const dimOptions = columns.filter((c) => c.role === "dimension");
   const measureOptions = columns.filter((c) => c.role === "measure");
 
+  // The cap used to be hardcoded at 12, so a dimension with more distinct
+  // values than that had categories the user could not reach at all. Let the
+  // slider run to the grouping column's real cardinality.
+  const topNMax = Math.max(2, Math.min(200, columns.find((c) => c.name === sel?.dim)?.cardinality ?? 12));
+
   const relatedGroups = useMemo(
     () => relatedFieldOptions(dataset?.id ?? null, datasets, relationships),
     [dataset?.id, datasets, relationships]
@@ -271,13 +276,13 @@ export default function Inspector() {
                   <input
                     type="range"
                     min={2}
-                    max={12}
+                    max={topNMax}
                     step={1}
-                    value={sel.topN}
+                    value={Math.min(sel.topN, topNMax)}
                     onChange={(e) => updateWidget(sel.id, { topN: Number(e.target.value) })}
                     className="flex-1"
                   />
-                  <span className="font-mono-plex text-[12.5px] w-[18px] text-right">{sel.topN}</span>
+                  <span className="font-mono-plex text-[12.5px] w-[26px] text-right">{Math.min(sel.topN, topNMax)}</span>
                 </span>
               </Field>
               {sel.type === "gauge" && (

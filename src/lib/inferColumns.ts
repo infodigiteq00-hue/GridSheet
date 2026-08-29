@@ -1,3 +1,4 @@
+import { hasKeySuffix } from "./relationships";
 import { CellValue, ColumnMeta, ColumnType, Row } from "./types";
 
 function isEmpty(v: CellValue | undefined | null): boolean {
@@ -17,12 +18,17 @@ function looksNumeric(v: CellValue): boolean {
 
 function looksDate(v: CellValue): boolean {
   if (v instanceof Date) return !isNaN(v.getTime());
-  if (typeof v === "string") {
-    if (/^\d+(\.\d+)?$/.test(v.trim())) return false;
-    const t = Date.parse(v);
-    return !isNaN(t) && /[-/]|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(v);
-  }
-  return false;
+  if (typeof v !== "string") return false;
+  const s = v.trim();
+  if (/^\d+(\.\d+)?$/.test(s)) return false;
+  // Requiring a genuine date *shape* first. Merely containing "-" and being
+  // tolerated by Date.parse is far too weak: it typed identifiers like
+  // "TXN-000001" and "IC-00001" as dates, which then drove trend lines and
+  // date-axis charts built on data that has no time meaning at all.
+  const numericDate = /^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}([ T]|$)/.test(s);
+  const monthName = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i.test(s);
+  if (!numericDate && !monthName) return false;
+  return !isNaN(Date.parse(s));
 }
 
 function toNumber(v: CellValue): number {
@@ -37,7 +43,17 @@ export function formatSample(v: CellValue): string {
   return String(v);
 }
 
-const IGNORE_NAME_RE = /\b(id|uuid|guid|url|link|email|phone|zip|postal|code|address)\b/i;
+/**
+ * `\b` does not fire across an underscore (both sides are word characters), so
+ * this only ever matched spaced/hyphenated names — "account_code" and
+ * "subsidiary_id" slipped straight through. Kept for the free-text names it
+ * does catch; identifier detection proper now goes through hasKeySuffix,
+ * which tokenizes on underscores and camelCase.
+ */
+const IGNORE_NAME_RE = /(^|[^a-z0-9])(uuid|guid|url|link|email|address)([^a-z0-9]|$)/i;
+
+/** "fiscal_year", "yr", "FY" — numerically typed, but a period label, not a quantity. */
+const YEAR_NAME_RE = /(^|[^a-z0-9])(year|yr|fy)([^a-z0-9]|$)/i;
 
 export function inferColumns(rows: Row[]): ColumnMeta[] {
   if (rows.length === 0) return [];
@@ -61,7 +77,15 @@ export function inferColumns(rows: Row[]): ColumnMeta[] {
 
     let role: ColumnMeta["role"];
     if (type === "number") {
-      role = IGNORE_NAME_RE.test(name) ? "ignore" : "measure";
+      // Numeric does not mean quantitative. Identifiers and period labels are
+      // stored as numbers too, and summing them yields nonsense like
+      // "Total account_code = 174,879,504". Only a real quantity is a measure;
+      // a code that repeats across rows stays groupable as a dimension, and a
+      // per-row primary key is not worth charting at all.
+      const isLabel = hasKeySuffix(name) || YEAR_NAME_RE.test(name) || IGNORE_NAME_RE.test(name);
+      if (!isLabel) role = "measure";
+      else if (cardinalityRatio > 0.9 && rows.length > 20) role = "ignore";
+      else role = "dimension";
     } else if (type === "date") {
       role = "dimension";
     } else {

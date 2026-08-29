@@ -56,7 +56,18 @@ export function aggregate(
   }
   if (sort === "desc") out = out.slice().sort((a, b) => b.value - a.value);
   if (sort === "asc") out = out.slice().sort((a, b) => a.value - b.value);
-  return out.slice(0, topN || 12);
+
+  const limit = topN || 12;
+  if (out.length <= limit) return out;
+
+  const kept = out.slice(0, limit);
+  const rest = out.slice(limit);
+  // A time series must stay contiguous — folding the tail of a date axis into
+  // one bucket would invent a point that never existed. Everywhere else the
+  // remainder is rolled up rather than dropped, so the chart still accounts
+  // for the whole dataset instead of quietly hiding categories.
+  if (chronological) return kept;
+  return [...kept, { key: `Other (${rest.length})`, value: rest.reduce((s, p) => s + p.value, 0) }];
 }
 
 export function total(rows: Row[], measure: string): number {
@@ -92,7 +103,10 @@ export interface PivotResult {
   rowTotal: (r: string) => number;
 }
 
-export function pivot(rows: Row[], dimRow: string, dimCol: string, measure: string, rowCap = 8, colCap = 6): PivotResult {
+// Caps exist to keep a cross-tab readable, not to hide data — the tile scrolls,
+// so they are set well above typical dimension cardinality (quarters, regions,
+// departments, account codes) rather than at the old 8x6.
+export function pivot(rows: Row[], dimRow: string, dimCol: string, measure: string, rowCap = 50, colCap = 24): PivotResult {
   const rowKeys = distinctValues(rows, dimRow, rowCap);
   const colKeys = distinctValues(rows, dimCol, colCap);
   const map = new Map<string, number>();

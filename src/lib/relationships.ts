@@ -87,6 +87,18 @@ function isKeyLikeName(name: string): boolean {
   return tokenize(name).map(singularize).some((t) => KEY_SUFFIX_TOKENS.has(t));
 }
 
+/**
+ * Like isKeyLikeName but anchored to the final token, which is where the
+ * convention actually puts it ("account_code", "subsidiary_id", "invoice_no").
+ * Requiring the suffix position keeps genuine measures whose name merely
+ * starts with a key word — "number_of_employees", "code_coverage_pct" —
+ * from being mistaken for identifiers by column-role inference.
+ */
+export function hasKeySuffix(name: string): boolean {
+  const parts = tokenize(name).map(singularize);
+  return parts.length > 0 && KEY_SUFFIX_TOKENS.has(parts[parts.length - 1]);
+}
+
 /** Strips a file extension and sheet decoration so "Customers (2024).csv" reads as "customer". */
 function tableStem(label: string): string {
   const tokens = tokenize(label.replace(/\.[a-z0-9]+$/i, "")).map(singularize);
