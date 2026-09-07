@@ -10,7 +10,9 @@ export default function LineChart({ widget, rows, columns, scale = 1, filled = f
   const c = colorsFor(widget.palette);
   const s = (widget.fontScale || 1) * scale;
   const isDateDimension = columns.find((column) => column.name === widget.dim)?.type === "date";
-  const data = aggregate(rows, widget.dim, widget.measure, "natural", Math.max(widget.topN, 12), isDateDimension);
+  // Long time series need their observations preserved. The chart's inner
+  // plot becomes wider for dense data instead of squeezing points together.
+  const data = aggregate(rows, widget.dim, widget.measure, "natural", Math.max(widget.topN, 48), isDateDimension);
   const tooltip = useChartTooltip();
 
   if (data.length === 0) {
@@ -27,11 +29,13 @@ export default function LineChart({ widget, rows, columns, scale = 1, filled = f
   const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(2) + " " + p[1].toFixed(2)).join(" ");
   const gid = "g" + widget.id;
   const bandWidth = data.length > 1 ? 100 / data.length : 100;
+  const plotMinWidth = data.length > 12 ? data.length * 34 : undefined;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: "100%", height: "100%", overflow: "visible" }}>
+    <div style={{ height: "100%", overflowX: plotMinWidth ? "auto" : "hidden" }}>
+      <div style={{ height: "100%", minWidth: plotMinWidth, display: "flex", flexDirection: "column" }}>
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: "100%", height: "100%", overflow: "visible" }}>
           <defs>
             <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={c[0]} stopOpacity={0.32} />
@@ -61,9 +65,10 @@ export default function LineChart({ widget, rows, columns, scale = 1, filled = f
               }))}
             />
           ))}
-        </svg>
+          </svg>
+        </div>
+        <AxisLabels data={data} s={s} />
       </div>
-      <AxisLabels data={data} s={s} />
     </div>
   );
 }

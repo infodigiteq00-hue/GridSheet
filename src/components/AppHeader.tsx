@@ -1,23 +1,45 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { selectActiveDataset, useAppStore } from "@/lib/store";
 
 const NAV_ITEMS: { href: string; label: string }[] = [
-  { href: "/", label: "Home" },
-  { href: "/upload", label: "Upload" },
-  { href: "/connections", label: "Connections" },
-  { href: "/templates", label: "Templates" },
-  { href: "/builder", label: "Builder" },
-  { href: "/published", label: "Published" },
+  { href: "/history", label: "History" },
 ];
 
 export default function AppHeader() {
   const pathname = usePathname();
+  const router = useRouter();
   const rowCount = useAppStore((s) => selectActiveDataset(s)?.rows.length ?? 0);
   const sheetCount = useAppStore((s) => s.datasets.length);
   const hasHydrated = useAppStore((s) => s.hasHydrated);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [menuOpen]);
+
+  async function logOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } finally {
+      router.push("/login");
+      router.refresh();
+    }
+  }
+
+  if (pathname === "/login") return null;
 
   return (
     <header className="sticky top-0 z-40 flex items-center gap-7 px-6 h-[62px] bg-[#f3f1ec]/[0.78] backdrop-blur-xl backdrop-saturate-150 border-b border-[rgba(23,22,26,0.09)]">
@@ -67,8 +89,27 @@ export default function AppHeader() {
           {hasHydrated ? `${sheetCount > 1 ? `${sheetCount} sheets · ` : ""}${rowCount} rows` : "\u00A0"}
         </span>
         <div className="w-px h-[18px] bg-[rgba(23,22,26,0.12)]" />
-        <div className="w-[27px] h-[27px] rounded-full bg-[#17161a] text-[#f3f1ec] grid place-items-center text-[11.5px] font-semibold">
-          U
+        <div className="relative" ref={menuRef}>
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-pressed={menuOpen}
+            className="w-[27px] h-[27px] rounded-full bg-[#17161a] text-[#f3f1ec] grid place-items-center text-[11.5px] font-semibold cursor-pointer"
+          >
+            U
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 top-[35px] z-50 min-w-[160px] rounded-[11px] border border-[rgba(23,22,26,0.12)] bg-[#fdfcfa] shadow-[0_8px_24px_rgba(23,22,26,0.16)] p-1.5">
+              <button
+                type="button"
+                onClick={logOut}
+                disabled={signingOut}
+                className="w-full text-left px-3 py-2 rounded-[8px] text-[13px] font-medium text-[#c0341c] cursor-pointer hover:bg-[rgba(192,52,28,0.08)] disabled:opacity-60"
+              >
+                {signingOut ? "Signing out…" : "Log out"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </header>

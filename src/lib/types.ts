@@ -85,6 +85,9 @@ export type PaletteKey = "cobalt" | "ember" | "ink" | "bloom";
 export type SortMode = "natural" | "desc" | "asc";
 export type FontKey = "grotesk" | "plex";
 
+/** Shared cap for chart top-N (inspector, AI sanitizers, and aggregate fallback). */
+export const MAX_TOP_N = 12;
+
 export interface Widget {
   id: string;
   type: WidgetType;
@@ -100,6 +103,7 @@ export interface Widget {
   palette: PaletteKey;
   fontScale: number;
   sort: SortMode;
+  /** Categories to keep on a chart before folding the rest into Other. */
   topN: number;
   font: FontKey;
   text: string;
@@ -113,6 +117,26 @@ export interface Widget {
 export interface DashboardState {
   boardTitle: string;
   widgets: Widget[];
+}
+
+/** A lightweight index entry for a locally saved workbook snapshot. */
+export interface DataHistoryEntry {
+  id: string;
+  title: string;
+  createdAt: number;
+  sheetCount: number;
+  rowCount: number;
+  fileNames: string[];
+}
+
+/** The complete local-only snapshot used when reopening a history entry. */
+export interface DataHistorySnapshot extends DataHistoryEntry {
+  datasets: Dataset[];
+  activeDatasetId: string | null;
+  dashboard: DashboardState;
+  layoutSource: "ai" | "heuristic" | null;
+  relationshipStatus: Record<string, "confirmed" | "dismissed">;
+  manualRelationships: Relationship[];
 }
 
 export const TYPE_LABEL: Record<WidgetType, string> = {

@@ -59,7 +59,7 @@ export default function DatasetList({ onAddMore }: { onAddMore?: () => void }) {
             >
               <div className="font-semibold text-[15px] tracking-[-0.01em] truncate">{d.label}</div>
               <div className="text-[12.5px] text-[#7a7981] font-mono-plex truncate">
-                {d.rows.length.toLocaleString("en-US")} rows · {d.columns.length} columns · {d.fileName}
+                {d.rows.length.toLocaleString("en-IN")} rows · {d.columns.length} columns · {d.fileName}
               </div>
             </button>
             {d.sourceUrl ? (

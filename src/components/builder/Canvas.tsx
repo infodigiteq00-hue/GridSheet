@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { animate } from "motion";
 import { suppressChartTooltips } from "@/components/ChartTooltip";
 import { useActiveDataset, useAppStore } from "@/lib/store";
@@ -22,9 +22,8 @@ import {
   clampHeight,
   clampSpan,
   colToX,
+  GRID_COLS,
   MAX_HEIGHT,
-  maxGrow,
-  maxGrowTopLeft,
   metricsFromInner,
   MIN_SPAN,
   nearestFree,
@@ -34,11 +33,66 @@ import {
   xToCol,
   yToRow,
   type GridBox,
+  type GridMetrics,
 } from "@/lib/gridLayout";
 
 interface Props {
   chatOpen?: boolean;
   onToggleChat?: () => void;
+}
+
+// The board's local origin sits at the center of a large but finite stage, so
+// panning past it in any direction (negative col/row) still lands on
+// positive, scrollable DOM coordinates — the same trick Figma-like canvases
+// use rather than a truly unbounded (infinite-memory) plane.
+const INFINITE_EXTENT = 10000;
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 2;
+const INFINITE_MAX_SPAN = 300;
+const MINIMAP_W = 180;
+const MINIMAP_H = 128;
+const MINIMAP_PAD = 220;
+
+function clampZoom(z: number): number {
+  return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+}
+
+interface MinimapBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  scale: number;
+}
+
+/** Logical (board-space) bounding box of every tile, padded, mapped to a
+ * contain-fit scale for the minimap panel. */
+function computeMinimapBounds(boxes: GridBox[], m: GridMetrics): MinimapBounds {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const b of boxes) {
+    const left = colToX(b.col, m);
+    const top = b.row;
+    minX = Math.min(minX, left);
+    minY = Math.min(minY, top);
+    maxX = Math.max(maxX, left + spanToWidth(b.colSpan, m));
+    maxY = Math.max(maxY, top + b.height);
+  }
+  if (!isFinite(minX)) {
+    minX = -MINIMAP_PAD;
+    minY = -MINIMAP_PAD;
+    maxX = MINIMAP_PAD;
+    maxY = MINIMAP_PAD;
+  } else {
+    minX -= MINIMAP_PAD;
+    minY -= MINIMAP_PAD;
+    maxX += MINIMAP_PAD;
+    maxY += MINIMAP_PAD;
+  }
+  const scale = Math.min(MINIMAP_W / (maxX - minX), MINIMAP_H / (maxY - minY));
+  return { minX, minY, maxX, maxY, scale };
 }
 
 function othersOf(id: string): GridBox[] {
@@ -61,7 +115,16 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
   const setBoardTitle = useAppStore((s) => s.setBoardTitle);
 
   const canvasRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const zoomLabelRef = useRef<HTMLButtonElement>(null);
+  const zoomCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
+  const minimapPanelRef = useRef<HTMLDivElement>(null);
+  const minimapViewportRef = useRef<HTMLDivElement>(null);
+  // Mirrors the `minimapBounds` memo for use inside imperative handlers
+  // (scroll listener, pointer gestures) whose closures aren't recreated every
+  // render — same reasoning as zoomRef below.
+  const minimapBoundsRef = useRef<MinimapBounds | null>(null);
   const tileEls = useRef(new Map<string, HTMLDivElement>());
   const velocity = useRef(createVelocityTracker());
   const dragOrigin = useRef({
@@ -109,24 +172,98 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
   const [exporting, setExporting] = useState(false);
   const [innerW, setInnerW] = useState(800);
   const [infiniteMode, setInfiniteMode] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  // Pointer handlers set up in startTileDrag/startResize close over whatever
+  // `zoom` was at gesture-start; reading a ref instead keeps live gestures
+  // correct if the value changes mid-drag (or across renders that don't
+  // re-run those effects).
+  const zoomRef = useRef(1);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
 
-  const rows = dataset?.rows ?? [];
   const widgets = dashboard.widgets;
   const boxes = useMemo(() => widgets.map(asBox), [widgets]);
   // A tile's pixel geometry must be based on one stable board width. Scaling
   // it from the currently occupied columns makes charts resize themselves
   // after every move and is what caused clipped/tiny widget bodies.
   const metrics = useMemo(() => metricsFromInner(innerW), [innerW]);
+  const minimapBounds = useMemo(() => computeMinimapBounds(boxes, metrics), [boxes, metrics]);
+
+  /** Viewport point → board-local px. Scroll lives on canvasRef, not boardRef. */
+  function screenToBoard(screenX: number, screenY: number): { x: number; y: number } | null {
+    const board = boardRef.current;
+    if (!board) return null;
+    // getBoundingClientRect() already reflects the current scroll position
+    // and the zoomed-stage transform, so the scroller's own scrollLeft/Top
+    // would just cancel out of a "screen → content → minus board offset"
+    // computation — the visual distance from the cursor to the board's
+    // current on-screen corner, divided by zoom, is the logical offset
+    // directly.
+    const bRect = board.getBoundingClientRect();
+    const z = zoomRef.current || 1;
+    return { x: (screenX - bRect.left) / z, y: (screenY - bRect.top) / z };
+  }
+
+  /** Positions the minimap's viewport rectangle from the current scroll/zoom
+   * state. Reuses screenToBoard on the scroller's own corners rather than
+   * hand-deriving from scrollLeft, for the same robustness reason zoomBy
+   * does — imperative, called from gesture handlers/listeners, never from
+   * React render. */
+  function updateMinimapViewport() {
+    const scroller = canvasRef.current;
+    const el = minimapViewportRef.current;
+    const b = minimapBoundsRef.current;
+    if (!scroller || !el || !b) return;
+    const r = scroller.getBoundingClientRect();
+    const topLeft = screenToBoard(r.left, r.top);
+    const bottomRight = screenToBoard(r.right, r.bottom);
+    if (!topLeft || !bottomRight) return;
+    el.style.left = `${(topLeft.x - b.minX) * b.scale}px`;
+    el.style.top = `${(topLeft.y - b.minY) * b.scale}px`;
+    el.style.width = `${Math.max(6, (bottomRight.x - topLeft.x) * b.scale)}px`;
+    el.style.height = `${Math.max(6, (bottomRight.y - topLeft.y) * b.scale)}px`;
+  }
+
+  /** Scrolls so the given board-local (logical) point becomes the center of
+   * the viewport, at the current zoom. Used by the minimap's click/drag-to-
+   * pan and by resetView. */
+  function centerOn(boardX: number, boardY: number) {
+    const scroller = canvasRef.current;
+    const board = boardRef.current;
+    if (!scroller || !board) return;
+    const r = scroller.getBoundingClientRect();
+    const bRect = board.getBoundingClientRect();
+    const z = zoomRef.current || 1;
+    const screenX = bRect.left + boardX * z;
+    const screenY = bRect.top + boardY * z;
+    scroller.scrollLeft += screenX - (r.left + r.width / 2);
+    scroller.scrollTop += screenY - (r.top + r.height / 2);
+    updateMinimapViewport();
+  }
+
+  useEffect(() => {
+    minimapBoundsRef.current = minimapBounds;
+    updateMinimapViewport();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minimapBounds]);
 
   useLayoutEffect(() => {
     if (!infiniteMode) return;
     const id = requestAnimationFrame(() => {
       const el = canvasRef.current;
       if (!el) return;
-      el.scrollLeft = 120;
-      el.scrollTop = 110;
+      // Center the viewport on the board's own origin (where existing tiles
+      // already cluster at small col/row values) rather than a fixed offset,
+      // so entering the canvas always shows the board with room to pan any
+      // direction from there.
+      const r = el.getBoundingClientRect();
+      el.scrollLeft = INFINITE_EXTENT - r.width / 2;
+      el.scrollTop = INFINITE_EXTENT - r.height / 2;
+      updateMinimapViewport();
     });
     return () => cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [infiniteMode]);
 
   useLayoutEffect(() => {
@@ -139,6 +276,31 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
     return () => ro.disconnect();
   }, []);
 
+  // The minimap's viewport rectangle tracks live scroll position. Panning is
+  // native browser scrolling (not React-driven), so this has to be a real
+  // scroll listener rather than something derived from render state — and
+  // it's rAF-throttled since scroll can fire far faster than once per frame.
+  useEffect(() => {
+    if (!infiniteMode) return;
+    const scroller = canvasRef.current;
+    if (!scroller) return;
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        updateMinimapViewport();
+      });
+    };
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    updateMinimapViewport();
+    return () => {
+      scroller.removeEventListener("scroll", onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [infiniteMode]);
+
   const bindTile = useCallback((id: string) => (el: HTMLDivElement | null) => {
     if (el) tileEls.current.set(id, el);
     else tileEls.current.delete(id);
@@ -148,9 +310,18 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
     const o = dragOrigin.current;
     const d = dragLive.current;
     const scroller = canvasRef.current;
+    // scrollLeft/scrollTop move the zoomed stage's visual position 1:1 in
+    // screen pixels (confirmed empirically — scrolling by N always shifts
+    // getBoundingClientRect by exactly -N regardless of zoom, even though
+    // scrollWidth itself is reported in unscaled layout units; the two are
+    // just inconsistent with each other, and only the scroll→position
+    // relationship matters here). So d.dx and the scroll delta are already in
+    // the same visual-pixel space; only their sum needs the /z conversion
+    // down to the logical units the tile's own transform/left/top use.
     const dsl = scroller ? scroller.scrollLeft - o.scrollLeft : 0;
     const dst = scroller ? scroller.scrollTop - o.scrollTop : 0;
-    return { x: d.dx + dsl, y: d.dy + dst };
+    const z = zoomRef.current || 1;
+    return { x: (d.dx + dsl) / z, y: (d.dy + dst) / z };
   }
 
   const applyDragTransform = useCallback((id: string) => {
@@ -172,19 +343,6 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
     return metrics;
   }
 
-  /** Viewport point → board-local px. Scroll lives on canvasRef, not boardRef. */
-  function screenToBoard(screenX: number, screenY: number): { x: number; y: number } | null {
-    const scroller = canvasRef.current;
-    const board = boardRef.current;
-    if (!scroller || !board) return null;
-    const sRect = scroller.getBoundingClientRect();
-    const bRect = board.getBoundingClientRect();
-    const contentX = screenX - sRect.left + scroller.scrollLeft;
-    const contentY = screenY - sRect.top + scroller.scrollTop;
-    const boardX = bRect.left - sRect.left + scroller.scrollLeft;
-    const boardY = bRect.top - sRect.top + scroller.scrollTop;
-    return { x: contentX - boardX, y: contentY - boardY };
-  }
 
   function dropFromPointer(id: string, dx: number, dy: number): GridBox | null {
     const widget = useAppStore.getState().dashboard.widgets.find((w) => w.id === id);
@@ -202,12 +360,12 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
     const m = liveMetrics();
     const desired: GridBox = {
       ...box,
-      // Infinite canvas keeps the released pixel position. The grid editor
-      // still uses its normal column/row snapping outside this mode.
-      col: infiniteMode
-        ? Math.max(0, local.x / m.step)
-        : xToCol(local.x, box.colSpan, m),
-      row: infiniteMode ? Math.max(0, local.y) : yToRow(local.y),
+      // Infinite canvas keeps the released pixel position, in any direction
+      // (negative col/row included — the board's origin sits at the stage's
+      // center, not its edge). The grid editor still uses its normal
+      // column/row snapping and non-negative clamp outside this mode.
+      col: infiniteMode ? local.x / m.step : xToCol(local.x, box.colSpan, m),
+      row: infiniteMode ? local.y : yToRow(local.y),
     };
     const others = othersOf(id);
     if (infiniteMode) {
@@ -445,8 +603,9 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
   /**
    * corner "br" (the original handle) grows right/down with col/row fixed.
    * corner "tl" mirrors it: the bottom-right corner stays anchored and col/row
-   * shift left/up as the tile grows, since there's no "push left/up" layout
-   * equivalent to lean on the way resizeWidget's pushDownLayout covers height.
+   * shift left/up as the tile grows. In either direction, the tile being
+   * resized keeps its intended slot and any overlapping neighbours reflow
+   * beneath it when the resize commits.
    */
   function startResize(id: string, corner: "br" | "tl" = "br") {
     return (e: React.PointerEvent<HTMLDivElement>) => {
@@ -460,8 +619,6 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
       const widget = useAppStore.getState().dashboard.widgets.find((w) => w.id === id);
       if (!widget) return;
       const box = asBox(widget);
-      const others = othersOf(id);
-      const grow = corner === "tl" ? maxGrowTopLeft(box, others) : maxGrow(box, others);
       const liveMetricsNow = liveMetrics();
       const startLeftPx = parseFloat(el.style.left || "0") || colToX(box.col, liveMetricsNow);
       const startTopPx = parseFloat(el.style.top || "0") || box.row;
@@ -485,18 +642,23 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
         height: box.height,
         leftPx: startLeftPx,
         topPx: startTopPx,
-        // Floored, not rounded: the store re-snaps colSpan/height to a whole
-        // column / ROW_SNAP multiple on commit (asBox, inside constrainBox),
-        // and box.col can be a fractional, continuous value after any
-        // infinite-canvas drag. Rounding grow's bound up here would let this
-        // resize claim more room than actually exists — the store would
-        // silently re-snap it, and the animated target and the committed
-        // result would drift apart, undoing the point of animating at all.
-        maxSpan: Math.max(MIN_SPAN, Math.floor(grow.colSpan)),
-        // Height growth is unbounded toward the bottom (resizeWidget pushes
-        // anything in the way down); toward the top there's nothing to push,
-        // so it has to stay within the real gap above.
-        maxHeight: corner === "tl" ? Math.max(120, Math.floor(grow.height / ROW_SNAP) * ROW_SNAP) : MAX_HEIGHT,
+        // Neighbours are not a resize limit: committing uses the layout
+        // reflow to make room for this tile. The only hard boundaries are the
+        // board edges and the minimum/maximum tile size — except in infinite
+        // mode, where there are no board edges (col/row can go negative) and
+        // GRID_COLS is just the reference width for column math, not an
+        // actual boundary, so a tile placed past column 12 must not have its
+        // resize capped by "GRID_COLS - box.col" going negative.
+        maxSpan: infiniteMode
+          ? INFINITE_MAX_SPAN
+          : corner === "tl"
+            ? Math.max(MIN_SPAN, Math.floor(box.col + box.colSpan))
+            : GRID_COLS - box.col,
+        maxHeight: infiniteMode
+          ? MAX_HEIGHT
+          : corner === "tl"
+            ? Math.max(120, Math.floor((box.row + box.height) / ROW_SNAP) * ROW_SNAP)
+            : MAX_HEIGHT,
       };
       setResizeId(id);
       select(id);
@@ -511,12 +673,18 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
         const node = tileEls.current.get(id);
         if (!node) return;
         const sign = corner === "tl" ? -1 : 1;
-        const rawW = live.startW + sign * (ev.clientX - live.startX);
-        const rawH = live.startH + sign * (ev.clientY - live.startY);
+        // Raw pointer deltas are visual (post-zoom) pixels; width/height/left
+        // styles set below are logical board units re-scaled by the zoomed
+        // stage ancestor, so they must be normalized the same way drag is.
+        const z = zoomRef.current || 1;
+        const dxLogical = (ev.clientX - live.startX) / z;
+        const dyLogical = (ev.clientY - live.startY) / z;
+        const rawW = live.startW + sign * dxLogical;
+        const rawH = live.startH + sign * dyLogical;
         const maxW = spanToWidth(live.maxSpan, liveMetrics());
         const visualW = rubberClamp(rawW, spanToWidth(2, liveMetrics()), maxW, live.startW);
         const visualH = rubberClamp(rawH, 120, live.maxHeight, live.startH);
-        const span = clampSpan(live.startSpan + sign * (ev.clientX - live.startX) / live.colW);
+        const span = clampSpan(live.startSpan + sign * dxLogical / live.colW);
         node.style.width = `${visualW}px`;
         node.style.height = `${visualH}px`;
         live.span = Math.min(live.maxSpan, span);
@@ -573,7 +741,7 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
           if (corner === "tl") {
             node.style.left = "";
             node.style.top = "";
-            updateWidget(id, { colSpan: span, height, col: finalCol, row: finalRow });
+            resizeWidget(id, { colSpan: span, height, col: finalCol, row: finalRow });
           } else {
             resizeWidget(id, { colSpan: span, height });
           }
@@ -608,6 +776,132 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
     };
   }
 
+  /**
+   * Zoom while keeping the board point under (anchorX, anchorY) fixed on
+   * screen. Applied fully imperatively — direct style/scroll mutation, no
+   * setState — the same reasoning as drag/resize elsewhere in this file: a
+   * wheel/pinch gesture can fire many events per frame, and routing each one
+   * through React would re-render the entire widget tree (every chart on the
+   * board) just to repaint a CSS transform. The React `zoom` state is only
+   * resynced on a short debounce once the gesture settles, so the zoom
+   * control's displayed percentage and any other reader of `zoom` catch up
+   * without driving the live gesture through reconciliation.
+   *
+   * The scroll compensation below must happen synchronously, not deferred to
+   * a later frame: reading the stage's position at the top of the next call
+   * has to see THIS call's result, or a fast run of wheel ticks compounds
+   * stale reads into a scroll position nowhere near any tile.
+   *
+   * Positions are measured directly via getBoundingClientRect rather than
+   * hand-derived from scrollLeft/padding/layout math — scrollLeft's effect on
+   * visual position is 1:1 in screen pixels (confirmed empirically), which is
+   * all this needs; deriving the stage's absolute screen position from it
+   * otherwise requires knowing the exact padding/layout offset, which is
+   * fragile to get precisely right and was the source of an earlier version
+   * of this function scrolling tiles out of view when zooming out.
+   */
+  function zoomBy(factor: number, anchorX?: number, anchorY?: number) {
+    const scroller = canvasRef.current;
+    const stage = stageRef.current;
+    if (!scroller || !stage) return;
+    const r = scroller.getBoundingClientRect();
+    const ax = anchorX ?? r.left + r.width / 2;
+    const ay = anchorY ?? r.top + r.height / 2;
+    const oldZoom = zoomRef.current || 1;
+    const newZoom = clampZoom(oldZoom * factor);
+    if (newZoom === oldZoom) return;
+
+    const stageRectBefore = stage.getBoundingClientRect();
+    const logicalX = (ax - stageRectBefore.left) / oldZoom;
+    const logicalY = (ay - stageRectBefore.top) / oldZoom;
+
+    zoomRef.current = newZoom;
+    stage.style.transform = `scale(${newZoom})`;
+    if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(newZoom * 100)}%`;
+
+    // Re-measure now that the transform changed (scroll hasn't moved yet),
+    // then correct scroll by exactly the resulting screen-space error.
+    const stageRectAfter = stage.getBoundingClientRect();
+    const newScreenX = stageRectAfter.left + logicalX * newZoom;
+    const newScreenY = stageRectAfter.top + logicalY * newZoom;
+    scroller.scrollLeft += newScreenX - ax;
+    scroller.scrollTop += newScreenY - ay;
+    updateMinimapViewport();
+
+    if (zoomCommitTimer.current) clearTimeout(zoomCommitTimer.current);
+    zoomCommitTimer.current = setTimeout(() => setZoom(zoomRef.current), 150);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (zoomCommitTimer.current) clearTimeout(zoomCommitTimer.current);
+    };
+  }, []);
+
+  function handleWheel(e: React.WheelEvent<HTMLDivElement>) {
+    if (!infiniteMode) return;
+    // Plain wheel/trackpad scroll pans natively via overflow:auto. Only
+    // Ctrl/Cmd+wheel (and trackpad pinch, which browsers report as wheel with
+    // ctrlKey set) zooms — matching Figma's convention and leaving normal
+    // scroll-to-pan alone.
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    // A trackpad pinch can report a large deltaY in a single event; keeping
+    // the exponent small makes each tick a gentle step instead of a jump
+    // that's hard to visually follow.
+    const factor = Math.exp(-e.deltaY * 0.003);
+    zoomBy(factor, e.clientX, e.clientY);
+  }
+
+  function minimapPointToBoard(clientX: number, clientY: number): { x: number; y: number } | null {
+    const panel = minimapPanelRef.current;
+    const b = minimapBoundsRef.current;
+    if (!panel || !b) return null;
+    const rect = panel.getBoundingClientRect();
+    return { x: (clientX - rect.left) / b.scale + b.minX, y: (clientY - rect.top) / b.scale + b.minY };
+  }
+
+  function startMinimapPan(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const jump = minimapPointToBoard(e.clientX, e.clientY);
+    if (jump) centerOn(jump.x, jump.y);
+    const move = (ev: PointerEvent) => {
+      const p = minimapPointToBoard(ev.clientX, ev.clientY);
+      if (p) centerOn(p.x, p.y);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  /** Zoom to 100% and recenter on the board's content — not just the origin,
+   * so it still finds the tiles after they've been panned/dragged far away. */
+  function resetView() {
+    zoomRef.current = 1;
+    setZoom(1);
+    if (stageRef.current) stageRef.current.style.transform = "scale(1)";
+    if (zoomLabelRef.current) zoomLabelRef.current.textContent = "100%";
+    if (zoomCommitTimer.current) clearTimeout(zoomCommitTimer.current);
+    const b = minimapBoundsRef.current;
+    if (b) {
+      centerOn((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2);
+    } else {
+      const scroller = canvasRef.current;
+      if (scroller) {
+        const r = scroller.getBoundingClientRect();
+        scroller.scrollLeft = INFINITE_EXTENT - r.width / 2;
+        scroller.scrollTop = INFINITE_EXTENT - r.height / 2;
+      }
+    }
+  }
+
   const dragHint = dragId
     ? "Drop in empty space — tiles won't overlap"
     : resizeId
@@ -633,7 +927,7 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
       if (!node) throw new Error("Dashboard canvas element not found");
       await exportDashboardAsPdf(node, {
         title: dashboard.boardTitle,
-        meta: `${dataset?.fileName ?? "Sample data"} · ${rows.length} rows`,
+        meta: `${dataset?.fileName ?? "Sample data"} · ${datasets.reduce((sum, d) => sum + (d.rows?.length ?? 0), 0)} rows`,
         fileName: dashboard.boardTitle,
       });
     } catch (err) {
@@ -646,7 +940,7 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
 
   return (
     <section
-      className={`min-w-0 flex flex-col ${exporting ? "is-exporting" : ""} ${infiniteMode ? "dashboard-infinite-mode fixed inset-x-0 bottom-0 top-[62px] z-50" : ""}`}
+      className={`min-w-0 min-h-0 flex flex-col ${exporting ? "is-exporting" : ""} ${infiniteMode ? "dashboard-infinite-mode fixed inset-x-0 bottom-0 top-[62px] z-50" : ""}`}
     >
       <div className="flex items-center gap-3 px-[22px] py-3 border-b border-[rgba(23,22,26,0.08)]">
         <input
@@ -658,7 +952,12 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
         <div className="export-hide text-[12.5px] text-[#8a8990] flex-1 min-w-0 whitespace-nowrap overflow-hidden text-ellipsis text-right">{dragHint}</div>
         <button
           type="button"
-          onClick={() => setInfiniteMode((value) => !value)}
+          onClick={() => {
+            setInfiniteMode((value) => !value);
+            zoomRef.current = 1;
+            setZoom(1);
+            if (stageRef.current) stageRef.current.style.transform = "";
+          }}
           aria-pressed={infiniteMode}
           title={infiniteMode ? "Exit infinite canvas" : "Open infinite canvas"}
           className="flex-none whitespace-nowrap border px-3 py-2.5 rounded-[9px] text-[13px] font-medium cursor-pointer transition-colors"
@@ -703,6 +1002,7 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
         ref={canvasRef}
         id="dashboard-export-area"
         onPointerDown={startCanvasPan}
+        onWheel={handleWheel}
         onClick={() => {
           if (ignoreClick.current) {
             ignoreClick.current = false;
@@ -710,16 +1010,24 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
           }
           select(null);
         }}
-        className={`flex-1 overflow-auto p-[22px] ${infiniteMode ? "dashboard-infinite-scroll" : ""}`}
+        className={`flex-1 overflow-auto p-[22px] relative ${infiniteMode ? "dashboard-infinite-scroll" : ""}`}
       >
-        <div className={infiniteMode ? "dashboard-infinite-stage" : undefined}>
+        <div
+          ref={stageRef}
+          className={infiniteMode ? "dashboard-infinite-stage" : undefined}
+          style={infiniteMode ? { transform: `scale(${zoom})`, transformOrigin: "0 0" } : undefined}
+        >
         <div
           ref={boardRef}
           className="relative"
           style={{
             minHeight: boardMin,
             height: boardMin,
-            ...(infiniteMode ? { width: 1180, margin: 260 } : {}),
+            // The stage is much larger than the board itself; anchoring the
+            // board at the stage's center (rather than its edge) is what lets
+            // a tile's col/row go negative and still land on positive,
+            // scrollable DOM coordinates in every direction.
+            ...(infiniteMode ? { position: "absolute", left: INFINITE_EXTENT, top: INFINITE_EXTENT, width: 1180 } : {}),
           }}
         >
           {widgets.map((w) => {
@@ -759,6 +1067,76 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
         </div>
         </div>
       </div>
+
+      {infiniteMode && (
+        <div
+          className="fixed bottom-6 right-6 z-[60] flex items-center gap-0.5 rounded-[11px] border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] p-1 shadow-[0_6px_20px_rgba(23,22,26,0.14)]"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            title="Zoom out"
+            onClick={() => zoomBy(1 / 1.2)}
+            className="h-8 w-8 rounded-[8px] text-[15px] font-medium cursor-pointer hover:bg-[rgba(23,22,26,0.06)]"
+          >
+            −
+          </button>
+          <button
+            ref={zoomLabelRef}
+            type="button"
+            title="Reset zoom to 100%"
+            onClick={() => zoomBy(1 / (zoomRef.current || 1))}
+            className="min-w-[52px] px-1.5 h-8 rounded-[8px] text-[12.5px] font-medium tabular-nums cursor-pointer hover:bg-[rgba(23,22,26,0.06)]"
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            title="Zoom in"
+            onClick={() => zoomBy(1.2)}
+            className="h-8 w-8 rounded-[8px] text-[15px] font-medium cursor-pointer hover:bg-[rgba(23,22,26,0.06)]"
+          >
+            +
+          </button>
+          <div className="mx-0.5 h-5 w-px bg-[rgba(23,22,26,0.12)]" />
+          <button
+            type="button"
+            title="Reset view — 100% zoom, recentered on your tiles"
+            onClick={resetView}
+            className="h-8 w-8 rounded-[8px] text-[13px] font-medium cursor-pointer hover:bg-[rgba(23,22,26,0.06)]"
+          >
+            ⤾
+          </button>
+        </div>
+      )}
+
+      {infiniteMode && (
+        <div
+          ref={minimapPanelRef}
+          onPointerDown={startMinimapPan}
+          title="Drag to pan"
+          className="fixed bottom-6 left-6 z-[60] cursor-crosshair overflow-hidden rounded-[11px] border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] shadow-[0_6px_20px_rgba(23,22,26,0.14)]"
+          style={{ width: MINIMAP_W, height: MINIMAP_H }}
+        >
+          {boxes.map((b) => (
+            <div
+              key={b.id}
+              className="absolute rounded-[2px] bg-[#2b4bff]/25 border border-[#2b4bff]/40"
+              style={{
+                left: (colToX(b.col, metrics) - minimapBounds.minX) * minimapBounds.scale,
+                top: (b.row - minimapBounds.minY) * minimapBounds.scale,
+                width: Math.max(2, spanToWidth(b.colSpan, metrics) * minimapBounds.scale),
+                height: Math.max(2, b.height * minimapBounds.scale),
+              }}
+            />
+          ))}
+          <div
+            ref={minimapViewportRef}
+            className="absolute rounded-[3px] border-2 border-[#2b4bff] pointer-events-none"
+            style={{ background: "rgba(43,75,255,0.08)" }}
+          />
+        </div>
+      )}
     </section>
   );
 }

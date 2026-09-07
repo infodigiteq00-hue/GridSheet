@@ -1,5 +1,5 @@
-import { toNumber } from "./inferColumns";
-import { ColumnMeta, Row, SortMode } from "./types";
+import { isEmpty, parseLooseDate, toScaledNumber } from "./inferColumns";
+import { ColumnMeta, MAX_TOP_N, Row, SortMode } from "./types";
 
 export function listDimNames(columns: ColumnMeta[]): string[] {
   const d = columns.filter((c) => c.role === "dimension").map((c) => c.name);
@@ -24,7 +24,12 @@ export interface AggPoint {
 
 function keyOf(row: Row, dim: string): string {
   const v = row[dim];
-  if (v instanceof Date) return v.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+  // A date-shaped value stored as text (common when a sheet is pasted rather
+  // than typed as a real Excel date cell) must bucket by month the same way
+  // an actual Date cell does — otherwise it groups by exact literal string,
+  // one bar per unique day instead of per month.
+  const d = parseLooseDate(v);
+  if (d) return d.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
   return String(v ?? "—");
 }
 
@@ -34,7 +39,8 @@ export function aggregate(
   measure: string,
   sort: SortMode,
   topN: number,
-  chronological = false
+  chronological = false,
+  rollupOther = false
 ): AggPoint[] {
   const order: string[] = [];
   const map = new Map<string, number>();
@@ -45,42 +51,78 @@ export function aggregate(
       map.set(k, 0);
       order.push(k);
     }
-    map.set(k, (map.get(k) || 0) + toNumber(row[measure]));
+    map.set(k, (map.get(k) || 0) + toScaledNumber(row[measure], measure));
     if (chronological && !dates.has(k)) {
-      const raw = row[dim];
-      const timestamp = raw instanceof Date ? raw.getTime() : Date.parse(String(raw ?? ""));
-      if (Number.isFinite(timestamp)) dates.set(k, timestamp);
+      const parsed = parseLooseDate(row[dim]);
+      if (parsed) dates.set(k, parsed.getTime());
     }
   }
   let out: AggPoint[] = order.map((k) => ({ key: k, value: map.get(k) || 0 }));
   if (chronological && dates.size > 0) {
     out = out.slice().sort((a, b) => (dates.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (dates.get(b.key) ?? Number.MAX_SAFE_INTEGER));
   }
-  if (sort === "desc") out = out.slice().sort((a, b) => b.value - a.value);
-  if (sort === "asc") out = out.slice().sort((a, b) => a.value - b.value);
 
-  const limit = topN || 12;
-  if (out.length <= limit) return out;
+  const limit = topN || MAX_TOP_N;
+  if (out.length <= limit) {
+    if (!chronological) {
+      if (sort === "desc") out = out.slice().sort((a, b) => b.value - a.value);
+      if (sort === "asc") out = out.slice().sort((a, b) => a.value - b.value);
+    }
+    return out;
+  }
 
-  const kept = out.slice(0, limit);
-  const rest = out.slice(limit);
   // A time series must stay contiguous — folding the tail of a date axis into
-  // one bucket would invent a point that never existed. Everywhere else the
-  // remainder is rolled up rather than dropped, so the chart still accounts
-  // for the whole dataset instead of quietly hiding categories.
-  if (chronological) return kept;
+  // one bucket would invent a point that never existed.
+  if (chronological) return out.slice(0, limit);
+
+  // Rank by value to decide the retained categories whenever an Other bucket is
+  // visible. Natural-sort charts then put those retained categories back into
+  // encounter order for display; KPI sparklines and other non-rollup callers
+  // retain their original truncating behaviour.
+  let kept: AggPoint[];
+  let rest: AggPoint[];
+  if (sort === "desc" || sort === "asc" || rollupOther) {
+    const ranked = out.slice().sort((a, b) => b.value - a.value);
+    const retained = ranked.slice(0, limit);
+    rest = ranked.slice(limit);
+    if (sort === "natural") {
+      const retainedKeys = new Set(retained.map((point) => point.key));
+      kept = out.filter((point) => retainedKeys.has(point.key));
+    } else {
+      kept = retained;
+      if (sort === "asc") kept.sort((a, b) => a.value - b.value);
+    }
+  } else {
+    kept = out.slice(0, limit);
+    rest = out.slice(limit);
+  }
+
+  if (!rollupOther) return kept;
   return [...kept, { key: `Other (${rest.length})`, value: rest.reduce((s, p) => s + p.value, 0) }];
 }
 
 export function total(rows: Row[], measure: string): number {
-  return rows.reduce((s, r) => s + toNumber(r[measure]), 0);
+  return rows.reduce((s, r) => s + toScaledNumber(r[measure], measure), 0);
 }
 
-export function trendPct(rows: Row[], measure: string): number {
-  if (rows.length < 4) return 0;
+/**
+ * null means "not enough real data to compare" — distinct from a real 0%.
+ * A naive first-half-vs-second-half split manufactures a fake -100%/+100%
+ * swing whenever one half is entirely unreported (a forward-looking fiscal
+ * template where only a few months have happened yet, a partial export,
+ * etc.) rather than genuinely zero activity. Blank cells collapse to 0 the
+ * same as real zeros once they reach toNumber, so this checks the *raw* rows
+ * for actual presence of data before trusting the comparison.
+ */
+export function trendPct(rows: Row[], measure: string): number | null {
+  if (rows.length < 4) return null;
   const mid = Math.floor(rows.length / 2);
-  const first = total(rows.slice(0, mid), measure);
-  const second = total(rows.slice(mid), measure);
+  const firstRows = rows.slice(0, mid);
+  const secondRows = rows.slice(mid);
+  const hasData = (bucket: Row[]) => bucket.some((r) => !isEmpty(r[measure]));
+  if (!hasData(firstRows) || !hasData(secondRows)) return null;
+  const first = total(firstRows, measure);
+  const second = total(secondRows, measure);
   if (first === 0) return second === 0 ? 0 : 100;
   return ((second - first) / Math.abs(first)) * 100;
 }
@@ -116,7 +158,7 @@ export function pivot(rows: Row[], dimRow: string, dimCol: string, measure: stri
   for (const row of rows) {
     const rk = keyOf(row, dimRow);
     const ck = keyOf(row, dimCol);
-    const val = toNumber(row[measure]);
+    const val = toScaledNumber(row[measure], measure);
     if (rowKeys.includes(rk)) {
       rowSums.set(rk, (rowSums.get(rk) || 0) + val);
     }
@@ -140,8 +182,8 @@ export interface ScatterPoint {
 
 export function scatterPoints(rows: Row[], xMeasure: string, yMeasure: string, groupDim: string): ScatterPoint[] {
   return rows.map((r) => ({
-    x: toNumber(r[xMeasure]),
-    y: toNumber(r[yMeasure]),
+    x: toScaledNumber(r[xMeasure], xMeasure),
+    y: toScaledNumber(r[yMeasure], yMeasure),
     group: keyOf(r, groupDim),
   }));
 }

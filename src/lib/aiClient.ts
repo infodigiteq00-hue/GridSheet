@@ -3,6 +3,39 @@
 import { buildStatsDigest } from "./statsDigest";
 import { Dataset, Widget } from "./types";
 
+export interface AnalysisChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AnalysisChatResult {
+  reply: string;
+  source: "ai" | "unavailable" | "error";
+  reason?: string;
+}
+
+/**
+ * Scopes a dashboard build across every loaded sheet — distinct from
+ * requestChatAnswer, which answers questions about one already-built
+ * dashboard's active dataset. Sends column summaries + aggregate digests
+ * per sheet, never raw rows.
+ */
+export function requestAnalysisChat(
+  message: string,
+  datasets: Dataset[],
+  history: AnalysisChatTurn[]
+): Promise<AnalysisChatResult> {
+  return postJson<AnalysisChatResult>("/api/ai/analysis-chat", {
+    message,
+    history,
+    sheets: datasets.map((ds) => ({
+      sheetName: ds.label,
+      columns: ds.columns,
+      digest: buildStatsDigest(ds.columns, ds.rows),
+    })),
+  });
+}
+
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",

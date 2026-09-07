@@ -59,7 +59,7 @@ export default function DataPanel() {
                   {d.label}
                 </span>
                 <span className="block font-mono-plex text-[10.5px] text-[#8a8990]">
-                  {d.rows.length.toLocaleString("en-US")} rows
+                  {d.rows.length.toLocaleString("en-IN")} rows
                 </span>
               </span>
               {links > 0 && (

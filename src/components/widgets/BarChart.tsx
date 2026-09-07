@@ -6,10 +6,11 @@ import { colorsFor } from "@/lib/palettes";
 import { useChartTooltip } from "@/components/ChartTooltip";
 import { AxisLabels, WidgetBodyProps } from "./types";
 
-export default function BarChart({ widget, rows, scale = 1 }: WidgetBodyProps) {
+export default function BarChart({ widget, rows, columns, scale = 1 }: WidgetBodyProps) {
   const c = colorsFor(widget.palette);
   const s = (widget.fontScale || 1) * scale;
-  const data = aggregate(rows, widget.dim, widget.measure, widget.sort, widget.topN);
+  const isDateDimension = columns.find((column) => column.name === widget.dim)?.type === "date";
+  const data = aggregate(rows, widget.dim, widget.measure, widget.sort, widget.topN, isDateDimension, true);
   const max = Math.max(...data.map((d) => d.value), 1);
   const grandTotal = sumTotal(rows, widget.measure);
   const tooltip = useChartTooltip();

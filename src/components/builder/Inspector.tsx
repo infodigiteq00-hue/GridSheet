@@ -6,7 +6,7 @@ import { relatedFieldOptions } from "@/lib/join";
 import { GRID_COLS } from "@/lib/gridLayout";
 import { pickDims, pickMeasures } from "@/lib/heuristicLayout";
 import { useAppStore, useVisibleRelationships } from "@/lib/store";
-import { FontKey, PaletteKey, SortMode, TYPE_LABEL, TYPES, Widget, WidgetType } from "@/lib/types";
+import { FontKey, MAX_TOP_N, PaletteKey, SortMode, TYPE_LABEL, TYPES, Widget, WidgetType } from "@/lib/types";
 import { useAiDatasetContext } from "@/lib/useAiContext";
 import { PALETTES } from "@/lib/palettes";
 import TypeIcon from "@/components/icons/TypeIcon";
@@ -62,10 +62,7 @@ export default function Inspector() {
   const dimOptions = columns.filter((c) => c.role === "dimension");
   const measureOptions = columns.filter((c) => c.role === "measure");
 
-  // The cap used to be hardcoded at 12, so a dimension with more distinct
-  // values than that had categories the user could not reach at all. Let the
-  // slider run to the grouping column's real cardinality.
-  const topNMax = Math.max(2, Math.min(200, columns.find((c) => c.name === sel?.dim)?.cardinality ?? 12));
+  const topNMax = Math.max(2, Math.min(MAX_TOP_N, columns.find((c) => c.name === sel?.dim)?.cardinality ?? MAX_TOP_N));
 
   const relatedGroups = useMemo(
     () => relatedFieldOptions(dataset?.id ?? null, datasets, relationships),
@@ -141,7 +138,7 @@ export default function Inspector() {
   }
 
   return (
-    <aside className="border-l border-[rgba(23,22,26,0.09)] bg-[#f0eee8] overflow-y-auto">
+    <aside className="min-h-0 border-l border-[rgba(23,22,26,0.09)] bg-[#f0eee8] overflow-y-auto">
       {!sel && (
         <div className="px-5 py-[26px] text-[#7a7981] text-sm leading-[1.6]">
           <div className="font-display text-base font-semibold text-[#17161a] mb-2 tracking-[-0.015em]">Nothing selected</div>
@@ -197,107 +194,106 @@ export default function Inspector() {
             </div>
           </Section>
 
-          <Section label="Data">
-            <div className="flex flex-col gap-2">
-              {datasets.length > 1 && (
-                <Field label="Sheet">
-                  <select
-                    data-testid="widget-sheet-select"
-                    value={dataset?.id ?? ""}
-                    onChange={(e) => changeWidgetDataset(e.target.value)}
-                    className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
-                  >
-                    {datasets.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.label}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              )}
-              <Field label="Group by">
-                <select
-                  data-testid="widget-dim-select"
-                  value={dimValue}
-                  onChange={(e) => changeDim(e.target.value)}
-                  className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
-                >
-                  <option value="">—</option>
-                  {dimOptions.map((d) => (
-                    <option key={d.name} value={d.name}>
-                      {d.name}
-                    </option>
-                  ))}
-                  {relatedGroups.map((g) => (
-                    <optgroup key={`${g.datasetLabel}:${g.viaColumn}`} label={`🔗 ${g.datasetLabel} (via ${g.viaColumn})`}>
-                      {g.options.map((o) => (
-                        <option key={o.fieldName} value={`rel#${flatRelated.indexOf(o)}`}>
-                          {o.datasetLabel}.{o.column}
+          {sel.type !== "text" && (sel.type !== "table" || datasets.length > 1) && (
+            <Section label="Data">
+              <div className="flex flex-col gap-2">
+                {datasets.length > 1 && (
+                  <Field label="Sheet">
+                    <select
+                      data-testid="widget-sheet-select"
+                      value={dataset?.id ?? ""}
+                      onChange={(e) => changeWidgetDataset(e.target.value)}
+                      className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
+                    >
+                      {datasets.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.label}
                         </option>
                       ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </Field>
-              {sel.dimRef && (
-                <div className="text-[11.5px] leading-[1.5] text-[#00806f] bg-[rgba(0,166,166,0.08)] border border-[rgba(0,166,166,0.28)] rounded-[7px] px-2.5 py-2">
-                  Grouping by a field looked up from{" "}
-                  <span className="font-mono-plex">{datasets.find((d) => d.id === sel.dimRef?.datasetId)?.label}</span> through
-                  the detected connection.
-                </div>
-              )}
-              <Field label="Measure">
-                <select
-                  value={sel.measure}
-                  onChange={(e) => updateWidget(sel.id, { measure: e.target.value })}
-                  className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
-                >
-                  <option value="">—</option>
-                  {measureOptions.map((m) => (
-                    <option key={m.name} value={m.name}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Sort">
-                <select
-                  value={sel.sort}
-                  onChange={(e) => updateWidget(sel.id, { sort: e.target.value as SortMode })}
-                  className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
-                >
-                  <option value="natural">Sheet order</option>
-                  <option value="desc">Highest first</option>
-                  <option value="asc">Lowest first</option>
-                </select>
-              </Field>
-              <Field label="Show top">
-                <span className="flex items-center gap-2.5">
-                  <input
-                    type="range"
-                    min={2}
-                    max={topNMax}
-                    step={1}
-                    value={Math.min(sel.topN, topNMax)}
-                    onChange={(e) => updateWidget(sel.id, { topN: Number(e.target.value) })}
-                    className="flex-1"
-                  />
-                  <span className="font-mono-plex text-[12.5px] w-[26px] text-right">{Math.min(sel.topN, topNMax)}</span>
-                </span>
-              </Field>
-              {sel.type === "gauge" && (
-                <Field label="Goal">
-                  <input
-                    type="number"
-                    value={sel.target || ""}
-                    onChange={(e) => updateWidget(sel.id, { target: Number(e.target.value) || 0 })}
-                    placeholder="auto"
-                    className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px] w-full"
-                  />
-                </Field>
-              )}
-            </div>
-          </Section>
+                    </select>
+                  </Field>
+                )}
+                {sel.type !== "table" && (
+                  <>
+                    <Field label="Group by">
+                      <select
+                        data-testid="widget-dim-select"
+                        value={dimValue}
+                        onChange={(e) => changeDim(e.target.value)}
+                        className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
+                      >
+                        <option value="">—</option>
+                        {dimOptions.map((d) => (
+                          <option key={d.name} value={d.name}>
+                            {d.name}
+                          </option>
+                        ))}
+                        {relatedGroups.map((g) => (
+                          <optgroup key={`${g.datasetLabel}:${g.viaColumn}`} label={`🔗 ${g.datasetLabel} (via ${g.viaColumn})`}>
+                            {g.options.map((o) => (
+                              <option key={o.fieldName} value={`rel#${flatRelated.indexOf(o)}`}>
+                                {o.datasetLabel}.{o.column}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Measure">
+                      <select
+                        value={sel.measure}
+                        onChange={(e) => updateWidget(sel.id, { measure: e.target.value })}
+                        className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
+                      >
+                        <option value="">—</option>
+                        {measureOptions.map((m) => (
+                          <option key={m.name} value={m.name}>
+                            {m.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Sort">
+                      <select
+                        value={sel.sort}
+                        onChange={(e) => updateWidget(sel.id, { sort: e.target.value as SortMode })}
+                        className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px]"
+                      >
+                        <option value="natural">Sheet order</option>
+                        <option value="desc">Highest first</option>
+                        <option value="asc">Lowest first</option>
+                      </select>
+                    </Field>
+                    <Field label="Show top">
+                      <span className="flex items-center gap-2.5">
+                        <input
+                          type="range"
+                          min={2}
+                          max={topNMax}
+                          step={1}
+                          value={Math.min(sel.topN, topNMax)}
+                          onChange={(e) => updateWidget(sel.id, { topN: Number(e.target.value) })}
+                          className="flex-1"
+                        />
+                        <span className="font-mono-plex text-[12.5px] w-[26px] text-right">{Math.min(sel.topN, topNMax)}</span>
+                      </span>
+                    </Field>
+                    {sel.type === "gauge" && (
+                      <Field label="Goal">
+                        <input
+                          type="number"
+                          value={sel.target || ""}
+                          onChange={(e) => updateWidget(sel.id, { target: Number(e.target.value) || 0 })}
+                          placeholder="auto"
+                          className="border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] rounded-lg px-2.5 py-[7px] text-[13.5px] w-full"
+                        />
+                      </Field>
+                    )}
+                  </>
+                )}
+              </div>
+            </Section>
+          )}
 
           <Section label="Size">
             <div className="grid grid-cols-4 gap-1.5 mb-2.5">

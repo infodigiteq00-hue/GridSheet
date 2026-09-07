@@ -24,7 +24,11 @@ export default function TemplatesPage() {
     const ds = dataset || buildSampleDataset();
     let datasetId = dataset?.id;
     if (!dataset) [datasetId] = addDatasets([ds]);
-    const layout = generateHeuristicLayout(ds.columns, kind, ds.isSample ? "Q3 Regional Performance" : undefined);
+    const layout = generateHeuristicLayout(
+      ds.columns,
+      kind,
+      ds.fileName === "q3-regional-performance.xlsx" ? "Q3 Regional Performance" : undefined
+    );
     setDashboard(layout, "heuristic", datasetId);
     router.push("/builder");
   }

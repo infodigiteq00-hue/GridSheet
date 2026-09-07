@@ -54,7 +54,7 @@ export default function Palette() {
   }
 
   return (
-    <aside className="border-r border-[rgba(23,22,26,0.09)] px-3.5 py-[18px] bg-[#f0eee8] flex flex-col gap-1.5 overflow-y-auto">
+    <aside className="min-h-0 border-r border-[rgba(23,22,26,0.09)] px-3.5 py-[18px] bg-[#f0eee8] flex flex-col gap-1.5 overflow-y-auto">
       <DataPanel />
 
       <div className="text-[11px] tracking-[0.08em] uppercase text-[#8a8990] font-semibold px-1.5 pb-2">Describe a tile</div>

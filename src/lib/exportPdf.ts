@@ -16,6 +16,46 @@ function slugify(value: string): string {
   return slug || "dashboard";
 }
 
+interface TileBounds {
+  top: number;
+  bottom: number;
+}
+
+/** CSS-pixel bounds of dashboard tiles, relative to `element`'s top edge. */
+function tileBoundsCss(element: HTMLElement): TileBounds[] {
+  const root = element.getBoundingClientRect();
+  const bounds: TileBounds[] = [];
+  for (const tile of element.querySelectorAll<HTMLElement>(".dashboard-tile")) {
+    const rect = tile.getBoundingClientRect();
+    bounds.push({ top: rect.top - root.top, bottom: rect.bottom - root.top });
+  }
+  return bounds;
+}
+
+/**
+ * End the slice at the latest tile edge that fits without crossing another
+ * tile. Tile tops are candidates as well as bottoms: a short neighbouring
+ * tile can end while a taller one continues beside it. If nothing fits (one
+ * tile is taller than a page), fall back to the hard maximum.
+ */
+function snapSlicePx(offsetPx: number, maxSlicePx: number, boundsPx: TileBounds[], canvasHeight: number): number {
+  const hardEnd = Math.min(offsetPx + maxSlicePx, canvasHeight);
+  if (hardEnd <= offsetPx) return 0;
+
+  const edges = new Set<number>([hardEnd]);
+  for (const { top, bottom } of boundsPx) {
+    if (top > offsetPx && top <= hardEnd) edges.add(top);
+    if (bottom > offsetPx && bottom <= hardEnd) edges.add(bottom);
+  }
+
+  for (const end of [...edges].sort((a, b) => b - a)) {
+    const cutsTile = boundsPx.some(({ top, bottom }) => top < end && end < bottom);
+    if (!cutsTile) return end - offsetPx;
+  }
+
+  return Math.min(maxSlicePx, canvasHeight - offsetPx);
+}
+
 /**
  * Rasterizes `element` and assembles it into a multi-page PDF with a native
  * text header, then triggers a browser download. This never opens the
@@ -32,7 +72,9 @@ export async function exportDashboardAsPdf(element: HTMLElement, opts: ExportPdf
   element.style.height = `${fullH}px`;
 
   let canvas: HTMLCanvasElement;
+  let tileBounds: TileBounds[] = [];
   try {
+    tileBounds = tileBoundsCss(element);
     canvas = await html2canvas(element, {
       scale: 2,
       backgroundColor: "#fdfcfa",
@@ -79,7 +121,11 @@ export async function exportDashboardAsPdf(element: HTMLElement, opts: ExportPdf
   const otherPageImgHeight = pageHeight - margin * 2;
 
   const pxPerMm = canvas.width / imgWidth;
-  const firstSlicePx = Math.min(canvas.height, Math.round(firstPageImgHeight * pxPerMm));
+  const cssToPx = fullH > 0 ? canvas.height / fullH : 1;
+  const boundsPx = tileBounds.map(({ top, bottom }) => ({
+    top: Math.round(top * cssToPx),
+    bottom: Math.round(bottom * cssToPx),
+  }));
 
   const sliceCanvas = document.createElement("canvas");
   const sliceCtx = sliceCanvas.getContext("2d");
@@ -99,10 +145,9 @@ export async function exportDashboardAsPdf(element: HTMLElement, opts: ExportPdf
   let isFirstPage = true;
 
   while (offsetPx < canvas.height) {
-    const maxSlicePx = isFirstPage
-      ? firstSlicePx
-      : Math.min(canvas.height - offsetPx, Math.round(otherPageImgHeight * pxPerMm));
-    const slicePx = Math.min(maxSlicePx, canvas.height - offsetPx);
+    const pageImgHeightMm = isFirstPage ? firstPageImgHeight : otherPageImgHeight;
+    const maxSlicePx = Math.min(canvas.height - offsetPx, Math.floor(pageImgHeightMm * pxPerMm));
+    const slicePx = snapSlicePx(offsetPx, maxSlicePx, boundsPx, canvas.height);
     if (slicePx <= 0) break;
 
     const dataUrl = drawSlice(offsetPx, slicePx);

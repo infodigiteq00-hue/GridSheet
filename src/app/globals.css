@@ -80,6 +80,12 @@
 
 .dashboard-tile {
   cursor: grab;
+  transition: left 220ms cubic-bezier(0.2, 0.8, 0.2, 1), top 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.dashboard-tile.is-lifting,
+.dashboard-tile.is-resizing {
+  transition: none;
 }
 
 .dashboard-infinite-mode {
@@ -89,18 +95,23 @@
 .dashboard-infinite-scroll {
   cursor: grab;
   background-color: #e7e5df;
-  background-image: radial-gradient(rgba(23, 22, 26, 0.16) 1px, transparent 1px);
-  background-size: 20px 20px;
 }
 
 .dashboard-infinite-scroll:active {
   cursor: grabbing;
 }
 
+/* A large-but-finite plane, not the viewport-fixed pattern it replaced: the
+   dot grid now lives on the scrolled/zoomed content itself, so it pans and
+   scales with the board instead of staying glued to the screen — the cue
+   that makes panning read as moving through space rather than just a
+   scrollbar drag. */
 .dashboard-infinite-stage {
   position: relative;
-  width: 2200px;
-  min-height: 1800px;
+  width: 20000px;
+  height: 20000px;
+  background-image: radial-gradient(rgba(23, 22, 26, 0.16) 1px, transparent 1px);
+  background-size: 20px 20px;
 }
 
 .dashboard-tile.is-lifting {

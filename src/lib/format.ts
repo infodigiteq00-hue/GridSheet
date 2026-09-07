@@ -1,28 +1,38 @@
+// Indian numbering: 1 lakh = 1,00,000. Deliberately no crore tier — every
+// large value stays in lakhs (₹1,749.0L, not ₹1.75Cr) per house convention.
+const LAKH = 100_000;
+
 export function fmtShort(n: number): string {
   if (!isFinite(n)) return "0";
   const abs = Math.abs(n);
-  if (abs >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (abs >= 1_000) return Math.round(n / 1000) + "k";
+  if (abs >= LAKH) {
+    const lakhs = n / LAKH;
+    return lakhs.toFixed(Math.abs(lakhs) < 1000 ? 1 : 0) + "L";
+  }
+  if (abs >= 1_000) return (n / 1000).toFixed(abs < 10_000 ? 1 : 0) + "k";
   return String(Math.round(n));
 }
 
 export function fmtFull(n: number): string {
   if (!isFinite(n)) return "0";
-  return Math.round(n).toLocaleString("en-US");
+  return Math.round(n).toLocaleString("en-IN");
 }
 
 export function isMoneyLike(name: string): boolean {
+  // Sales-related quantities are units, not rupees. A broad "sales" match
+  // previously put a dollar sign in front of fields such as "Sales Qty (MT)".
+  if (/\b(qty|quantity|unit|units|mt|kg|count|counter)\b/i.test(name)) return false;
   return /revenue|spend|sales|price|cost|profit|income|budget|amount|\$/i.test(name);
 }
 
 export function fmtValue(n: number, measureName: string): string {
-  return isMoneyLike(measureName) ? "$" + fmtShort(n) : fmtFull(n);
+  return isMoneyLike(measureName) ? "₹" + fmtShort(n) : fmtFull(n);
 }
 
 /** Full, unrounded-looking precision counterpart to fmtValue — used in tooltips
  * where the abbreviated axis/label value ("$12k") isn't precise enough. */
 export function fmtValueFull(n: number, measureName: string): string {
-  return isMoneyLike(measureName) ? "$" + fmtFull(n) : fmtFull(n);
+  return isMoneyLike(measureName) ? "₹" + fmtFull(n) : fmtFull(n);
 }
 
 export function timeAgo(ms: number): string {

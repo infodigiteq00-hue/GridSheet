@@ -6,10 +6,11 @@ import { colorsFor } from "@/lib/palettes";
 import { useChartTooltip } from "@/components/ChartTooltip";
 import { WidgetBodyProps } from "./types";
 
-export default function Donut({ widget, rows, scale = 1 }: WidgetBodyProps) {
+export default function Donut({ widget, rows, columns, scale = 1 }: WidgetBodyProps) {
   const c = colorsFor(widget.palette);
   const s = (widget.fontScale || 1) * scale;
-  const data = aggregate(rows, widget.dim, widget.measure, "desc", Math.max(widget.topN, 6));
+  const isDateDimension = columns.find((column) => column.name === widget.dim)?.type === "date";
+  const data = aggregate(rows, widget.dim, widget.measure, "desc", Math.max(widget.topN, 6), isDateDimension, true);
   const totalVal = data.reduce((a, d) => a + d.value, 0) || 1;
   const tooltip = useChartTooltip();
 

@@ -118,9 +118,14 @@ export function boardHeight(boxes: GridBox[], extra = 180): number {
   return Math.max(320, bottom + extra);
 }
 
+// Compact stat cards are deliberately fixed-size — stretching a KPI or gauge
+// to fill six empty columns just spreads a small number across dead space
+// instead of using it. Every other type genuinely benefits from more room.
+const NO_AUTO_STRETCH: Widget["type"][] = ["kpi", "gauge"];
+
 export function packFlow(widgets: Widget[]): Widget[] {
   const colY = Array<number>(GRID_COLS).fill(0);
-  return widgets.map((w) => {
+  const placed = widgets.map((w) => {
     const span = clampSpan(w.colSpan);
     const height = clampHeight(w.height);
     let bestX = 0;
@@ -135,6 +140,31 @@ export function packFlow(widgets: Widget[]): Widget[] {
     }
     for (let i = 0; i < span; i++) colY[bestX + i] = bestY + height + GRID_GAP;
     return { ...w, colSpan: span, height, col: bestX, row: bestY };
+  });
+  return growTrailingTiles(placed);
+}
+
+/**
+ * The shelf packer above places every widget at its own requested width, so
+ * a lone half-width chart with nothing queued to sit beside it leaves the
+ * rest of its row empty — the gap is real free space, not a rendering bug,
+ * but nothing ever reclaims it. This grows each tile rightward up to the
+ * nearest column any OTHER tile actually occupies across its vertical span,
+ * so a row fills automatically whenever the leftover space genuinely fits.
+ */
+function growTrailingTiles(widgets: Widget[]): Widget[] {
+  return widgets.map((w, i) => {
+    if (NO_AUTO_STRETCH.includes(w.type)) return w;
+    const rightEdge = w.col + w.colSpan;
+    if (rightEdge >= GRID_COLS) return w;
+    let maxRight = GRID_COLS;
+    for (let j = 0; j < widgets.length; j++) {
+      if (j === i) continue;
+      const other = widgets[j];
+      const sharesVerticalSpace = w.row < other.row + other.height && other.row < w.row + w.height;
+      if (sharesVerticalSpace && other.col >= rightEdge) maxRight = Math.min(maxRight, other.col);
+    }
+    return maxRight > rightEdge ? { ...w, colSpan: maxRight - w.col } : w;
   });
 }
 
@@ -183,8 +213,11 @@ export function nearestFree(desired: GridBox, others: GridBox[]): { col: number;
  */
 export function nearestFreeUnbounded(desired: GridBox, others: GridBox[], colStep: number): { col: number; row: number } {
   const height = clampHeight(desired.height);
-  const col0 = Math.max(0, desired.col);
-  const row0 = Math.max(0, desired.row);
+  // Genuinely unbounded — a tile released above or left of the canvas origin
+  // stays there rather than snapping back to 0, which is what made panning
+  // past the top-left edge feel bounded despite "infinite" in the name.
+  const col0 = desired.col;
+  const row0 = desired.row;
   const base = { ...desired, height, col: col0, row: row0 };
   if (!collides(base, others)) return { col: col0, row: row0 };
 
@@ -192,8 +225,8 @@ export function nearestFreeUnbounded(desired: GridBox, others: GridBox[], colSte
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-        const col = Math.max(0, col0 + dx * colStep);
-        const row = Math.max(0, row0 + dy * ROW_SNAP);
+        const col = col0 + dx * colStep;
+        const row = row0 + dy * ROW_SNAP;
         if (!collides({ ...base, col, row }, others)) return { col, row };
       }
     }
@@ -273,15 +306,68 @@ export function pushDownLayout(target: GridBox, others: GridBox[]): Map<string, 
   return moved;
 }
 
+/** True when two tiles collide, treating the board gutter as required space. */
+function collidesWithGutter(candidate: GridBox, placed: GridBox[]): boolean {
+  return placed.some((other) => {
+    const horizontal = candidate.col < other.col + other.colSpan && candidate.col + candidate.colSpan > other.col;
+    const vertical = candidate.row < other.row + other.height + GRID_GAP && other.row < candidate.row + candidate.height + GRID_GAP;
+    return horizontal && vertical;
+  });
+}
+
+/**
+ * Reflow a board after a resize while keeping the resized tile fixed. Every
+ * other tile is placed in the highest available row where it fits; when a row
+ * has several openings, it prefers the column closest to its current one.
+ * This gives the canvas a useful vertical compaction without arbitrarily
+ * moving the tile the user just resized to the bottom of the dashboard.
+ */
+export function compactAround(target: GridBox, others: GridBox[]): Map<string, Pick<GridBox, "col" | "row">> {
+  const placed: GridBox[] = [target];
+  const positions = new Map<string, Pick<GridBox, "col" | "row">>();
+  const sorted = [...others].sort((a, b) => a.row - b.row || a.col - b.col);
+  const searchLimit = Math.max(
+    boardHeight([target, ...others], 0) + sorted.reduce((sum, box) => sum + box.height + GRID_GAP, 0),
+    target.row + target.height + GRID_GAP
+  );
+
+  for (const candidate of sorted) {
+    const span = clampSpan(candidate.colSpan);
+    const height = clampHeight(candidate.height);
+    let slot: Pick<GridBox, "col" | "row"> | null = null;
+
+    for (let row = 0; row <= searchLimit && !slot; row += ROW_SNAP) {
+      let closest: Pick<GridBox, "col" | "row"> | null = null;
+      for (let col = 0; col <= GRID_COLS - span; col++) {
+        const trial = { ...candidate, col, row, colSpan: span, height };
+        if (collidesWithGutter(trial, placed)) continue;
+        if (!closest || Math.abs(col - candidate.col) < Math.abs(closest.col - candidate.col)) {
+          closest = { col, row };
+        }
+      }
+      slot = closest;
+    }
+
+    // The finite 12-column board always has a slot before searchLimit. Keep a
+    // defensive fallback so malformed imported coordinates cannot create an
+    // invalid overlapping layout.
+    const resolved = slot ?? { col: 0, row: boardHeight(placed, GRID_GAP) };
+    positions.set(candidate.id, resolved);
+    placed.push({ ...candidate, ...resolved, colSpan: span, height });
+  }
+
+  return positions;
+}
+
 export function constrainBox(box: GridBox, others: GridBox[]): GridBox {
   const colSpan = clampSpan(box.colSpan);
   const height = clampHeight(box.height);
   // Infinite-canvas tiles may intentionally sit beyond the original
-  // twelve-column editing area. Normal grid interactions clamp their input
-  // before it reaches this function.
-  const col = Math.max(0, box.col);
-  const row = Math.max(0, box.row);
-  const grown = { ...box, col, row, colSpan, height };
+  // twelve-column editing area, in any direction — including negative
+  // col/row. Normal grid interactions (xToCol/yToRow) already clamp their
+  // input to non-negative before it reaches this function, so this stays a
+  // no-op for the fixed grid and only matters for infinite-canvas placement.
+  const grown = { ...box, colSpan, height };
   if (!collides(grown, others)) return grown;
   const { col: fc, row: fr } = nearestFree(grown, others);
   return { ...grown, col: fc, row: fr };

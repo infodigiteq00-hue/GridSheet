@@ -217,7 +217,7 @@ export default function RelationshipGraph({
               fill="#8a8990"
               style={{ fontSize: 10.5, fontFamily: "var(--font-plex-mono), monospace" }}
             >
-              {d.rows.length.toLocaleString("en-US")} rows · {d.columns.length} cols
+              {d.rows.length.toLocaleString("en-IN")} rows · {d.columns.length} cols
             </text>
           </g>
         );

@@ -57,7 +57,7 @@ export default function PublishedPage() {
           <span>
             Source: {dataset?.fileName ?? "sample data"} ·{" "}
             {datasets.length > 1
-              ? `${datasets.length} sheets · ${datasets.reduce((n, d) => n + d.rows.length, 0).toLocaleString("en-US")} rows`
+              ? `${datasets.length} sheets · ${datasets.reduce((n, d) => n + d.rows.length, 0).toLocaleString("en-IN")} rows`
               : `${rows.length} rows`}
           </span>
           {dataset?.sourceUrl ? <SyncStatus compact /> : <span>· updated moments ago</span>}

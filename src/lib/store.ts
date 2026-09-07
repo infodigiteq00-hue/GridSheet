@@ -3,14 +3,17 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { browserStateStorage, readHistoryRecord, removeHistoryRecord, saveHistoryRecord } from "./browserStateStorage";
 import { defaultWidgetForType } from "./heuristicLayout";
-import { asBox, constrainBox, findOpenSlot, nearestFree, pushDownLayout, withPositions } from "./gridLayout";
+import { asBox, compactAround, constrainBox, findOpenSlot, nearestFree, withPositions } from "./gridLayout";
 import { newDatasetId, newId } from "./id";
 import { mergeColumns } from "./inferColumns";
 import { buildManualRelationship, detectRelationships } from "./relationships";
 import {
   ColumnMeta,
   ColumnRole,
+  DataHistoryEntry,
+  DataHistorySnapshot,
   Dataset,
   DatasetInput,
   DashboardState,
@@ -27,7 +30,7 @@ export const DEFAULT_REFRESH_INTERVAL_SEC = 60;
 // Layout normalization is part of the persisted state contract. Bump this
 // whenever the collision repair rules change so existing boards are repaired
 // instead of continuing to render stale overlapping coordinates.
-export const STORE_VERSION = 4;
+export const STORE_VERSION = 6;
 
 export type { DatasetInput };
 
@@ -45,6 +48,8 @@ interface AppState {
   relationships: Relationship[];
   relationshipStatus: Record<string, RelationshipStatus>;
   manualRelationships: Relationship[];
+  history: DataHistoryEntry[];
+  currentHistoryId: string | null;
   dashboard: DashboardState;
   selectedId: string | null;
   layoutSource: LayoutSource;
@@ -62,7 +67,11 @@ interface AppState {
   addWidget: (type: WidgetType) => void;
   addCustomWidget: (widget: Widget) => void;
   updateWidget: (id: string, patch: Partial<Widget>) => void;
-  resizeWidget: (id: string, patch: Pick<Widget, "colSpan" | "height">) => void;
+  resizeWidget: (id: string, patch: Pick<Widget, "colSpan" | "height"> & Partial<Pick<Widget, "col" | "row">>) => void;
+  compactDashboard: () => void;
+  saveHistorySnapshot: () => void;
+  restoreHistorySnapshot: (id: string) => Promise<boolean>;
+  removeHistorySnapshot: (id: string) => void;
   removeWidget: (id: string) => void;
   duplicateWidget: (id: string) => void;
   reorderWidgets: (fromId: string, toId: string) => void;
@@ -162,6 +171,50 @@ function withRelationships(datasets: Dataset[]): { datasets: Dataset[]; relation
   return { datasets, relationships: detectRelationships(datasets) };
 }
 
+function persistedSnapshot(state: AppState): PersistedShape {
+  // Full row data is retained in IndexedDB, so dashboards remain usable after
+  // a reload even when the source workbook is larger than localStorage allows.
+  return {
+    datasets: state.datasets,
+    activeDatasetId: state.activeDatasetId,
+    dashboard: state.dashboard,
+    layoutSource: state.layoutSource,
+    relationshipStatus: state.relationshipStatus,
+    manualRelationships: state.manualRelationships,
+    history: state.history,
+    currentHistoryId: state.currentHistoryId,
+  };
+}
+
+function historyTitle(datasets: Dataset[], dashboard: DashboardState): string {
+  if (dashboard.boardTitle && dashboard.boardTitle !== emptyDashboard.boardTitle) return dashboard.boardTitle;
+  const names = [...new Set(datasets.map((dataset) => dataset.fileName.replace(/\.[^.]+$/, "")))];
+  return names.length === 1 ? names[0] : names[0] ? `${names[0]} + ${names.length - 1} more` : "Imported data";
+}
+
+function historyEntry(state: AppState, id: string, createdAt = Date.now()): DataHistoryEntry {
+  return {
+    id,
+    title: historyTitle(state.datasets, state.dashboard),
+    createdAt,
+    sheetCount: state.datasets.length,
+    rowCount: state.datasets.reduce((total, dataset) => total + dataset.rows.length, 0),
+    fileNames: [...new Set(state.datasets.map((dataset) => dataset.fileName))],
+  };
+}
+
+function historySnapshot(state: AppState, entry: DataHistoryEntry): DataHistorySnapshot {
+  return {
+    ...entry,
+    datasets: state.datasets,
+    activeDatasetId: state.activeDatasetId,
+    dashboard: state.dashboard,
+    layoutSource: state.layoutSource,
+    relationshipStatus: state.relationshipStatus,
+    manualRelationships: state.manualRelationships,
+  };
+}
+
 /* -------------------------------------------------------------------- store */
 
 export const useAppStore = create<AppState>()(
@@ -173,6 +226,8 @@ export const useAppStore = create<AppState>()(
       relationships: [],
       relationshipStatus: {},
       manualRelationships: [],
+      history: [],
+      currentHistoryId: null,
       dashboard: emptyDashboard,
       selectedId: null,
       layoutSource: null,
@@ -189,6 +244,15 @@ export const useAppStore = create<AppState>()(
             activeDatasetId: s.activeDatasetId ?? created[0].id,
           };
         });
+        // A multi-sheet upload arrives as one input batch, so it becomes one
+        // restorable history item rather than a separate entry per worksheet.
+        // Reuse the in-progress workspace's existing history id (if any) so
+        // "Add another sheet" updates that entry instead of forking a new
+        // one — saveHistorySnapshot already falls back to a fresh id when
+        // there is no current workspace yet.
+        if (created.some((dataset) => !dataset.isSample)) {
+          get().saveHistorySnapshot();
+        }
         return created.map((d) => d.id);
       },
 
@@ -225,6 +289,9 @@ export const useAppStore = create<AppState>()(
           dashboard: emptyDashboard,
           selectedId: null,
           layoutSource: null,
+          // Start over clears the active workspace, not the saved local
+          // history. A past upload can still be reopened from History.
+          currentHistoryId: null,
         }),
 
       setActiveDatasetId: (id) => set((s) => (s.datasets.some((d) => d.id === id) ? { activeDatasetId: id } : s)),
@@ -242,7 +309,7 @@ export const useAppStore = create<AppState>()(
           };
         }),
 
-      setDashboard: (dashboard, source = null, datasetId) =>
+      setDashboard: (dashboard, source = null, datasetId) => {
         set((s) => {
           const boundId = datasetId ?? selectActiveDataset(s)?.id;
           const widgets = withPositions(
@@ -253,7 +320,11 @@ export const useAppStore = create<AppState>()(
             selectedId: null,
             layoutSource: source,
           };
-        }),
+        });
+        // A freshly created dashboard completes the current import's saved
+        // snapshot, so reopening it restores both data and its dashboard.
+        if (get().datasets.length > 0) get().saveHistorySnapshot();
+      },
 
       setBoardTitle: (title) => set((s) => ({ dashboard: { ...s.dashboard, boardTitle: title } })),
 
@@ -283,14 +354,37 @@ export const useAppStore = create<AppState>()(
 
       updateWidget: (id, patch) =>
         set((s) => {
-          const layoutTouched = "col" in patch || "row" in patch || "colSpan" in patch || "height" in patch;
+          const current = s.dashboard.widgets.find((w) => w.id === id);
+          if (!current) return s;
+          const next = { ...current, ...patch };
+          const sizeChanged = "colSpan" in patch || "height" in patch;
+          const positionChanged = "col" in patch || "row" in patch;
+
+          // Inspector controls and AI tile edits change size via updateWidget,
+          // not the pointer-resize action. Give them the exact same anchored
+          // compaction behavior so a smaller tile cannot leave a dead gap.
+          if (sizeChanged) {
+            const resizedBox = asBox(next);
+            const others = s.dashboard.widgets.filter((w) => w.id !== id).map(asBox);
+            const reflowed = compactAround(resizedBox, others);
+            return {
+              dashboard: {
+                ...s.dashboard,
+                widgets: s.dashboard.widgets.map((w) => {
+                  if (w.id === id) return { ...next, ...resizedBox };
+                  const position = reflowed.get(w.id);
+                  return position === undefined ? w : { ...w, ...position };
+                }),
+              },
+            };
+          }
+
           return {
             dashboard: {
               ...s.dashboard,
               widgets: s.dashboard.widgets.map((w) => {
                 if (w.id !== id) return w;
-                const next = { ...w, ...patch };
-                if (!layoutTouched) return next;
+                if (!positionChanged) return next;
                 const others = s.dashboard.widgets.filter((x) => x.id !== id).map(asBox);
                 const resolved = constrainBox(asBox(next), others);
                 return { ...next, ...resolved };
@@ -305,18 +399,94 @@ export const useAppStore = create<AppState>()(
           if (!current) return s;
           const resizedBox = asBox({ ...current, ...patch });
           const others = s.dashboard.widgets.filter((w) => w.id !== id).map(asBox);
-          const pushed = pushDownLayout(resizedBox, others);
+          const reflowed = compactAround(resizedBox, others);
           return {
             dashboard: {
               ...s.dashboard,
               widgets: s.dashboard.widgets.map((w) => {
-                if (w.id === id) return { ...w, colSpan: resizedBox.colSpan, height: resizedBox.height };
-                const row = pushed.get(w.id);
-                return row === undefined ? w : { ...w, row };
+                // The resized tile is the anchor. Preserve its position and
+                // make room by reflowing the surrounding tiles, rather than
+                // feeding it through constrainBox (which finds an empty slot
+                // and can send the tile itself to the bottom of the board).
+                if (w.id === id) {
+                  return {
+                    ...w,
+                    col: resizedBox.col,
+                    row: resizedBox.row,
+                    colSpan: resizedBox.colSpan,
+                    height: resizedBox.height,
+                  };
+                }
+                const position = reflowed.get(w.id);
+                return position === undefined ? w : { ...w, ...position };
               }),
             },
           };
         }),
+
+      compactDashboard: () =>
+        set((s) => {
+          const boxes = s.dashboard.widgets.map(asBox);
+          if (boxes.length < 2) return s;
+          // Keep the visually first tile fixed and compact every other tile
+          // around it. This repairs legacy boards that were created before
+          // size changes reflowed their neighbours.
+          const [anchor, ...others] = [...boxes].sort((a, b) => a.row - b.row || a.col - b.col);
+          const reflowed = compactAround(anchor, others);
+          return {
+            dashboard: {
+              ...s.dashboard,
+              widgets: s.dashboard.widgets.map((w) => {
+                if (w.id === anchor.id) return { ...w, ...anchor };
+                const position = reflowed.get(w.id);
+                return position === undefined ? w : { ...w, ...position };
+              }),
+            },
+          };
+        }),
+
+      saveHistorySnapshot: () => {
+        const state = get();
+        if (state.datasets.length === 0 || state.datasets.every((dataset) => dataset.isSample)) return;
+        const id = state.currentHistoryId ?? newId();
+        const previous = state.history.find((entry) => entry.id === id);
+        const entry = historyEntry(state, id, previous?.createdAt);
+        // History is user-owned: retain every saved workspace until the user
+        // explicitly removes it. The full data lives in IndexedDB, while this
+        // small list is only the index shown on the History page.
+        const history = [entry, ...state.history.filter((item) => item.id !== id)];
+        set({ history, currentHistoryId: id });
+        void saveHistoryRecord(historySnapshot(get(), entry)).catch(() => {
+          // Current data remains usable even if the browser rejects storage.
+        });
+      },
+
+      restoreHistorySnapshot: async (id) => {
+        try {
+          const snapshot = await readHistoryRecord<DataHistorySnapshot>(id);
+          if (!snapshot) return false;
+          const restored = normalizePersisted(snapshot);
+          set((state) => ({
+            ...restored,
+            selectedId: null,
+            history: state.history,
+            currentHistoryId: id,
+          }));
+          get().compactDashboard();
+          get().recomputeRelationships();
+          return true;
+        } catch {
+          return false;
+        }
+      },
+
+      removeHistorySnapshot: (id) => {
+        set((state) => ({
+          history: state.history.filter((entry) => entry.id !== id),
+          currentHistoryId: state.currentHistoryId === id ? null : state.currentHistoryId,
+        }));
+        void removeHistoryRecord(id).catch(() => {});
+      },
 
       removeWidget: (id) =>
         set((s) => ({
@@ -477,20 +647,20 @@ export const useAppStore = create<AppState>()(
     {
       name: "gridsheet-app-state",
       version: STORE_VERSION,
-      storage: createJSONStorage(() => localStorage),
-      partialize: (s) => ({
-        datasets: s.datasets,
-        activeDatasetId: s.activeDatasetId,
-        dashboard: s.dashboard,
-        layoutSource: s.layoutSource,
-        relationshipStatus: s.relationshipStatus,
-        manualRelationships: s.manualRelationships,
-      }),
+      storage: createJSONStorage(() => browserStateStorage),
+      partialize: persistedSnapshot,
       migrate: (persisted, version) => migratePersisted(persisted, version),
       merge: (persisted, current) => ({ ...current, ...normalizePersisted(persisted) }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);
+        state?.compactDashboard();
         state?.recomputeRelationships();
+        // Workspaces saved before History existed become visible on their
+        // first reload too; users should not need to import the same file
+        // again just to create an entry.
+        if (state?.currentHistoryId === null && state.datasets.some((dataset) => !dataset.isSample)) {
+          state.saveHistorySnapshot();
+        }
       },
     }
   )
@@ -506,6 +676,8 @@ type PersistedShape = Partial<{
   layoutSource: LayoutSource;
   relationshipStatus: Record<string, RelationshipStatus>;
   manualRelationships: Relationship[];
+  history: DataHistoryEntry[];
+  currentHistoryId: string | null;
 }>;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -514,6 +686,18 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function looksLikeDataset(v: unknown): v is Partial<Dataset> {
   return isRecord(v) && Array.isArray(v.rows) && Array.isArray(v.columns);
+}
+
+function repairHistoryEntry(raw: unknown): DataHistoryEntry | null {
+  if (!isRecord(raw) || typeof raw.id !== "string" || !raw.id) return null;
+  return {
+    id: raw.id,
+    title: typeof raw.title === "string" && raw.title.trim() ? raw.title : "Imported data",
+    createdAt: typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
+    sheetCount: typeof raw.sheetCount === "number" && raw.sheetCount >= 0 ? raw.sheetCount : 0,
+    rowCount: typeof raw.rowCount === "number" && raw.rowCount >= 0 ? raw.rowCount : 0,
+    fileNames: Array.isArray(raw.fileNames) ? raw.fileNames.filter((name): name is string => typeof name === "string") : [],
+  };
 }
 
 function repairDataset(raw: Partial<Dataset>, index: number, taken: Set<string>): Dataset {
@@ -594,6 +778,14 @@ export function normalizePersisted(persisted: unknown): PersistedShape {
   out.manualRelationships = Array.isArray(persisted.manualRelationships)
     ? (persisted.manualRelationships as Relationship[])
     : [];
+
+  out.history = Array.isArray(persisted.history)
+    ? persisted.history.map(repairHistoryEntry).filter((entry): entry is DataHistoryEntry => entry !== null)
+    : [];
+  out.currentHistoryId =
+    typeof persisted.currentHistoryId === "string" && out.history.some((entry) => entry.id === persisted.currentHistoryId)
+      ? persisted.currentHistoryId
+      : null;
 
   return out;
 }

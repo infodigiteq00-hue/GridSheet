@@ -57,13 +57,19 @@ export function buildStatsDigest(columns: ColumnMeta[], rows: Row[]): StatsDiges
   const dateCol = columns.find((c) => c.type === "date");
   let trend: TrendStat | null = null;
   if (dateCol && leadMeasure && rows.length >= 4) {
-    const pct = Math.round(trendPct(rows, leadMeasure) * 10) / 10;
-    trend = {
-      dim: dateCol.name,
-      measure: leadMeasure,
-      pctChange: pct,
-      direction: pct > 2 ? "up" : pct < -2 ? "down" : "flat",
-    };
+    const raw = trendPct(rows, leadMeasure);
+    // null means one comparison half had no real data at all (e.g. a
+    // forward-looking period that hasn't happened yet) — not a real trend,
+    // so this stays unset rather than reporting a fabricated swing to the AI.
+    if (raw !== null) {
+      const pct = Math.round(raw * 10) / 10;
+      trend = {
+        dim: dateCol.name,
+        measure: leadMeasure,
+        pctChange: pct,
+        direction: pct > 2 ? "up" : pct < -2 ? "down" : "flat",
+      };
+    }
   }
 
   return { rowCount: rows.length, measures, dimensions, trend };

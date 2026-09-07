@@ -1,6 +1,6 @@
 import { newId } from "./id";
 import { packFlow } from "./gridLayout";
-import { ColumnMeta, DashboardState, TYPE_LABEL, Widget, WidgetType } from "./types";
+import { ColumnMeta, DashboardState, MAX_TOP_N, TYPE_LABEL, Widget, WidgetType } from "./types";
 
 export type TemplateKind = "overview" | "kpi" | "table" | "exec";
 
@@ -62,7 +62,7 @@ export function mk(partial: Partial<Widget> & { type: WidgetType; title: string 
     palette: "cobalt",
     fontScale: 1,
     sort: "natural",
-    topN: 12,
+    topN: MAX_TOP_N,
     font: "grotesk",
     text: "",
     target: 0,
@@ -71,6 +71,15 @@ export function mk(partial: Partial<Widget> & { type: WidgetType; title: string 
 }
 
 export function generateHeuristicLayout(columns: ColumnMeta[], kind: TemplateKind = "overview", boardTitleHint?: string): DashboardState {
+  const allMeasures = pickAllMeasures(columns);
+  if (allMeasures.length === 0) {
+    const dims = pickDims(columns, 2);
+    const [d0] = dims;
+    return {
+      boardTitle: boardTitleHint || "Untitled dashboard",
+      widgets: packFlow([mk({ type: "table", title: boardTitleHint || "All records", dim: d0 || "", measure: "", colSpan: 12, height: 320 })]),
+    };
+  }
   const dims = pickDims(columns, 2);
   const measures = pickMeasures(columns, 4);
   const [d0, d1] = dims;
@@ -113,7 +122,6 @@ export function generateHeuristicLayout(columns: ColumnMeta[], kind: TemplateKin
     // "overview" is what "Build my dashboard" actually runs. Every numeric
     // measure gets its own chart here — a 4-measure sheet shouldn't silently
     // drop the other 3 just because the old template only had 4 slots.
-    const allMeasures = pickAllMeasures(columns);
     const dimMeta = columns.find((c) => c.name === d0);
     const chartType = chartTypeFor(dimMeta);
     const palettes: Widget["palette"][] = ["cobalt", "bloom", "ember", "ink"];
@@ -141,12 +149,6 @@ export function generateHeuristicLayout(columns: ColumnMeta[], kind: TemplateKin
     });
     if (d1 && allMeasures.length) {
       widgets.push(mk({ type: "pivot", title: `${allMeasures[0]}: ${d0} × ${d1}`, dim: d0, measure: allMeasures[0], colSpan: 12, height: 300 }));
-    }
-    // A pure lookup sheet (codes, names, regions — no quantities) has nothing
-    // to chart. Show the records themselves instead of leaving it blank or,
-    // worse, plotting an identifier just to fill the space.
-    if (allMeasures.length === 0) {
-      widgets.push(mk({ type: "table", title: boardTitleHint || "All records", dim: d0, measure: "", colSpan: 12, height: 320 }));
     }
   }
 

@@ -26,7 +26,7 @@ const MIN_CONFIDENCE = 0.45;
 /** Without a unique side there is no key, so a link needs real variety to be meaningful. */
 const MIN_MANY_TO_MANY_DISTINCT = 8;
 
-const KEY_SUFFIX_TOKENS = new Set(["id", "ids", "key", "keys", "code", "codes", "no", "num", "number", "ref", "fk", "pk"]);
+const KEY_SUFFIX_TOKENS = new Set(["id", "ids", "key", "keys", "code", "codes", "no", "num", "number", "ref", "fk", "pk", "zip", "zipcode", "postal", "postcode", "phone", "tel", "fax", "mobile"]);
 
 export interface DetectionSummary {
   relationships: Relationship[];
@@ -325,10 +325,10 @@ function evaluatePair(a: ColumnProfile, b: ColumnProfile): Relationship | null {
   if (confidence < MIN_CONFIDENCE) return null;
 
   const evidence: string[] = [
-    `${matched.toLocaleString("en-US")} of ${from.distinct.toLocaleString("en-US")} distinct ${from.datasetLabel}.${from.name} values matched (${pct(overlapFrom)})`,
+    `${matched.toLocaleString("en-IN")} of ${from.distinct.toLocaleString("en-IN")} distinct ${from.datasetLabel}.${from.name} values matched (${pct(overlapFrom)})`,
   ];
   if (to.unique) {
-    evidence.push(`${to.datasetLabel}.${to.name} is unique across ${to.nonEmptyCount.toLocaleString("en-US")} rows — it reads as a primary key`);
+    evidence.push(`${to.datasetLabel}.${to.name} is unique across ${to.nonEmptyCount.toLocaleString("en-IN")} rows — it reads as a primary key`);
   } else if (kind === "many-to-many") {
     evidence.push("Neither side is unique, so this reads as a many-to-many bridge");
   }
@@ -463,7 +463,7 @@ export function buildManualRelationship(opts: {
     evidence: [
       "Added by hand",
       fromDistinct
-        ? `${matched.toLocaleString("en-US")} of ${fromDistinct.toLocaleString("en-US")} distinct ${from.label}.${fromCol.name} values matched`
+        ? `${matched.toLocaleString("en-IN")} of ${fromDistinct.toLocaleString("en-IN")} distinct ${from.label}.${fromCol.name} values matched`
         : "No comparable values found — the join may return blanks",
     ],
     origin: "manual",

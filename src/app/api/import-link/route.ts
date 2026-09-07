@@ -1,3 +1,5 @@
+import { suggestColumnLabels } from "@/lib/aiColumnLabels";
+import { applyColumnLabels } from "@/lib/columnNames";
 import { NextRequest, NextResponse } from "next/server";
 import { inferColumns } from "@/lib/inferColumns";
 import { normalizeSpreadsheetLink } from "@/lib/linkSource";
@@ -69,11 +71,16 @@ export async function POST(req: NextRequest) {
     if (parsed.length === 0) {
       return NextResponse.json({ error: "That sheet parsed but had no rows." }, { status: 422 });
     }
-    const sheets = parsed.map((sheet) => ({
+    const initialSheets = parsed.map((sheet) => ({
       sheetName: sheet.sheetName,
       rows: sheet.rows,
       columns: inferColumns(sheet.rows),
     }));
+    const labels = await suggestColumnLabels(initialSheets);
+    const sheets = initialSheets.map((sheet) => {
+      const renamed = applyColumnLabels(sheet.rows, sheet.columns, labels[sheet.sheetName]);
+      return { sheetName: sheet.sheetName, rows: renamed.rows, columns: inferColumns(renamed.rows) };
+    });
     return NextResponse.json({
       sheets,
       // First sheet is also returned flat so older callers keep working.
