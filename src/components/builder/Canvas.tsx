@@ -5,9 +5,12 @@ import { animate } from "motion";
 import { suppressChartTooltips } from "@/components/ChartTooltip";
 import { useActiveDataset, useAppStore } from "@/lib/store";
 import { useWidgetDataResolver } from "@/lib/useWidgetData";
+import { requestTileFromPrompt } from "@/lib/aiClient";
+import { looksLikeEditIntent } from "@/lib/tileHeuristic";
 import DashboardTile from "@/components/builder/DashboardTile";
 import SyncStatus from "@/components/SyncStatus";
 import { exportDashboardAsPdf } from "@/lib/exportPdf";
+import { TYPE_LABEL, type WidgetType } from "@/lib/types";
 import {
   createVelocityTracker,
   DRAG_THRESHOLD,
@@ -40,6 +43,12 @@ interface Props {
   chatOpen?: boolean;
   onToggleChat?: () => void;
 }
+
+/** "Add a tile" grouped by what it's for, not the raw enum order — visuals first, then stats/text. */
+const TILE_GROUPS: WidgetType[][] = [
+  ["bar", "line", "area", "pie", "scatter", "gauge", "heatmap", "map"],
+  ["kpi", "table", "pivot", "text"],
+];
 
 // The board's local origin sits at the center of a large but finite stage, so
 // panning past it in any direction (negative col/row) still lands on
@@ -109,10 +118,49 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
   const dashboard = useAppStore((s) => s.dashboard);
   const selectedId = useAppStore((s) => s.selectedId);
   const select = useAppStore((s) => s.select);
+  const addWidget = useAppStore((s) => s.addWidget);
+  const addCustomWidget = useAppStore((s) => s.addCustomWidget);
   const removeWidget = useAppStore((s) => s.removeWidget);
   const updateWidget = useAppStore((s) => s.updateWidget);
   const resizeWidget = useAppStore((s) => s.resizeWidget);
   const setBoardTitle = useAppStore((s) => s.setBoardTitle);
+
+  const selectedWidget = dashboard.widgets.find((w) => w.id === selectedId) || null;
+  const [tilePrompt, setTilePrompt] = useState("");
+  const [tileType, setTileType] = useState<"auto" | WidgetType>("auto");
+  const [tileLoading, setTileLoading] = useState(false);
+  const [tileNote, setTileNote] = useState<string | null>(null);
+
+  async function submitTilePrompt() {
+    const text = tilePrompt.trim();
+    // With no description, the dropdown alone still drops in a default tile
+    // of that type — the old icon-bar behavior, just funneled through one bar.
+    if (!text) {
+      if (tileType !== "auto") addWidget(tileType);
+      return;
+    }
+    if (!dataset || tileLoading) return;
+    setTileLoading(true);
+    setTileNote(null);
+    try {
+      const isEdit = !!selectedWidget && looksLikeEditIntent(text);
+      const { widget, source, reason } = await requestTileFromPrompt(text, dataset, isEdit ? selectedWidget! : undefined);
+      const finalWidget = tileType === "auto" ? widget : { ...widget, type: tileType };
+      if (isEdit && selectedWidget) {
+        updateWidget(selectedWidget.id, { ...finalWidget, id: selectedWidget.id });
+      } else {
+        addCustomWidget(finalWidget);
+      }
+      setTilePrompt("");
+      if (source === "heuristic") {
+        setTileNote(reason || "Using local keyword matching — add OPENAI_API_KEY in .env.local for smarter results.");
+      }
+    } catch (err) {
+      setTileNote(err instanceof Error ? err.message : "Couldn't create that tile — try again.");
+    } finally {
+      setTileLoading(false);
+    }
+  }
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -1061,10 +1109,57 @@ export default function Canvas({ chatOpen = false, onToggleChat }: Props) {
           {dashboard.widgets.length === 0 && (
             <div className="py-20 text-center text-[#8a8990]">
               <div className="font-display text-lg font-semibold text-[#17161a] mb-2">Nothing on the board yet</div>
-              <div className="text-sm">Add a tile from the left, or start from a template.</div>
+              <div className="text-sm">Describe a tile below, or pick a type and add one.</div>
             </div>
           )}
         </div>
+        </div>
+      </div>
+
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-2">
+        {tileNote && (
+          <div className="max-w-[420px] rounded-[10px] border border-[rgba(23,22,26,0.12)] bg-[#fdfcfa] px-3 py-2 text-[12px] leading-[1.5] text-[#6b6a71] shadow-[0_6px_18px_rgba(23,22,26,0.12)]">
+            {tileNote}
+          </div>
+        )}
+        <div
+          className="flex items-center gap-1 rounded-full border border-[rgba(23,22,26,0.14)] bg-[#fdfcfa] p-1.5 shadow-[0_10px_28px_rgba(23,22,26,0.16)]"
+          style={{ width: 560 }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <select
+            value={tileType}
+            onChange={(e) => setTileType(e.target.value as "auto" | WidgetType)}
+            title="Chart type"
+            className="flex-none h-9 rounded-full border-0 bg-[#f0eee8] pl-3 pr-2 text-[12.5px] font-medium text-[#3d3c44] outline-none cursor-pointer"
+          >
+            <option value="auto">Auto</option>
+            {TILE_GROUPS.flat().map((t) => (
+              <option key={t} value={t}>
+                {TYPE_LABEL[t]}
+              </option>
+            ))}
+          </select>
+          <input
+            value={tilePrompt}
+            onChange={(e) => setTilePrompt(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitTilePrompt();
+              }
+            }}
+            placeholder={selectedWidget ? `Describe a change — e.g. "make this a bar chart"` : `Describe a tile — e.g. "revenue by region"`}
+            className="flex-1 min-w-0 border-0 bg-transparent px-2 text-[13px] outline-none"
+          />
+          <button
+            type="button"
+            onClick={submitTilePrompt}
+            disabled={tileLoading || (!tilePrompt.trim() && tileType === "auto")}
+            className="flex-none whitespace-nowrap border-0 bg-[#2b4bff] text-white rounded-full px-4 h-9 text-[12.5px] font-semibold cursor-pointer transition-transform active:scale-95 disabled:opacity-45 disabled:cursor-default"
+          >
+            {tileLoading ? "Thinking…" : tilePrompt.trim() ? "✨ Generate" : "Add"}
+          </button>
         </div>
       </div>
 

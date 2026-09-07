@@ -29,10 +29,11 @@ export default function Kpi({ widget, rows, scale = 1 }: WidgetBodyProps) {
         <div style={{ fontFamily: "var(--font-space-grotesk), sans-serif", fontSize: 34 * s, fontWeight: 700, letterSpacing: "-0.035em", lineHeight: 1 }}>
           {fmtValue(v, widget.measure)}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 7, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 7, minWidth: 0 }}>
           {deltaLabel !== null && (
             <span
               style={{
+                flex: "none",
                 fontSize: 11.5 * s,
                 color: "#fff",
                 background: delta !== null && delta >= 0 ? c[0] : "#c0341c",
@@ -44,7 +45,21 @@ export default function Kpi({ widget, rows, scale = 1 }: WidgetBodyProps) {
               {deltaLabel}
             </span>
           )}
-          <span style={{ fontSize: 12 * s, color: "#7a7981" }}>
+          {/* A wrapped second line here steals the height the sparkline
+              needs below it, pushing it past the tile's clipped bottom
+              edge — keep this to one line and ellipsize instead. */}
+          <span
+            title={deltaLabel === null ? widget.measure || "value" : `${widget.measure || "value"} · vs earlier period`}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              whiteSpace: "nowrap",
+              textOverflow: "ellipsis",
+              fontSize: 12 * s,
+              color: "#7a7981",
+            }}
+          >
             {deltaLabel === null ? widget.measure || "value" : `${widget.measure || "value"} · vs earlier period`}
           </span>
         </div>

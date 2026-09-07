@@ -21,6 +21,64 @@ interface TileBounds {
   bottom: number;
 }
 
+/**
+ * html2canvas clips text that overflows a `text-overflow: ellipsis` box but
+ * does not paint the "…" glyph itself (a long-standing html2canvas
+ * limitation) — so on-screen "Total Qty in unit o…" rasterizes as the
+ * hard-cut "Total Qty in unit o". Bake a real ellipsis into the text content
+ * of every overflowing node right before capture, then restore it after.
+ *
+ * html2canvas measures text with its own font metrics, which don't always
+ * agree with the canvas 2D context's `measureText` used here. If we cut the
+ * string to exactly fit, that mismatch can make html2canvas think our
+ * already-shortened "…foo…" still overflows and clip it a second time —
+ * eating the very ellipsis glyph we just added. So: (1) leave a few pixels
+ * of slack when sizing the cut, and (2) turn off overflow/ellipsis on the
+ * element for the capture, since the text is now short enough on its own.
+ */
+function bakeEllipsisTruncation(root: HTMLElement): () => void {
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return () => {};
+
+  const SAFETY_MARGIN_PX = 4;
+  const restores: { node: Text; text: string; el: HTMLElement; overflow: string; textOverflow: string }[] = [];
+  for (const el of root.querySelectorAll<HTMLElement>("*")) {
+    const onlyChild = el.firstChild;
+    if (el.childNodes.length !== 1 || onlyChild?.nodeType !== Node.TEXT_NODE) continue;
+    const text = onlyChild.textContent ?? "";
+    if (!text.trim() || el.scrollWidth <= el.clientWidth + 1) continue;
+
+    const computed = getComputedStyle(el);
+    if (computed.textOverflow !== "ellipsis" || computed.whiteSpace !== "nowrap") continue;
+
+    const available =
+      el.clientWidth -
+      (parseFloat(computed.paddingLeft) || 0) -
+      (parseFloat(computed.paddingRight) || 0) -
+      SAFETY_MARGIN_PX;
+    ctx.font = `${computed.fontStyle} ${computed.fontWeight} ${computed.fontSize} ${computed.fontFamily}`;
+
+    let truncated = text;
+    while (truncated.length > 1 && ctx.measureText(truncated + "…").width > available) {
+      truncated = truncated.slice(0, -1);
+    }
+    if (truncated === text) continue;
+
+    restores.push({ node: onlyChild as Text, text, el, overflow: el.style.overflow, textOverflow: el.style.textOverflow });
+    onlyChild.textContent = `${truncated.trimEnd()}…`;
+    el.style.overflow = "visible";
+    el.style.textOverflow = "clip";
+  }
+
+  return () => {
+    for (const { node, text, el, overflow, textOverflow } of restores) {
+      node.textContent = text;
+      el.style.overflow = overflow;
+      el.style.textOverflow = textOverflow;
+    }
+  };
+}
+
 /** CSS-pixel bounds of dashboard tiles, relative to `element`'s top edge. */
 function tileBoundsCss(element: HTMLElement): TileBounds[] {
   const root = element.getBoundingClientRect();
@@ -64,6 +122,11 @@ function snapSlicePx(offsetPx: number, maxSlicePx: number, boundsPx: TileBounds[
 export async function exportDashboardAsPdf(element: HTMLElement, opts: ExportPdfOptions): Promise<void> {
   const { title, meta } = opts;
 
+  // html2canvas rasterizes whatever is loaded at call time; if a custom
+  // webfont is still in flight it silently falls back to a generic system
+  // font for that capture, even though the live page looks correct.
+  await document.fonts.ready;
+
   const prevOverflow = element.style.overflow;
   const prevHeight = element.style.height;
   const fullW = Math.max(element.scrollWidth, element.clientWidth);
@@ -73,6 +136,7 @@ export async function exportDashboardAsPdf(element: HTMLElement, opts: ExportPdf
 
   let canvas: HTMLCanvasElement;
   let tileBounds: TileBounds[] = [];
+  const restoreEllipsis = bakeEllipsisTruncation(element);
   try {
     tileBounds = tileBoundsCss(element);
     canvas = await html2canvas(element, {
@@ -87,6 +151,7 @@ export async function exportDashboardAsPdf(element: HTMLElement, opts: ExportPdf
       scrollY: 0,
     });
   } finally {
+    restoreEllipsis();
     element.style.overflow = prevOverflow;
     element.style.height = prevHeight;
   }
